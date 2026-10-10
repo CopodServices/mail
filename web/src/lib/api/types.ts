@@ -35,3 +35,10 @@ export type SessionMailbox = {
 	address: string;
 	domain: string;
 };
+
+/** One mailbox's storage meter, from GET /api/mailboxes. */
+export type MailboxStorage = {
+	mailboxId: string;
+	usedBytes: number;
+	quotaBytes: number;
+};

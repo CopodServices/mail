@@ -376,6 +376,8 @@
 	"source.title": "原始邮件",
 	"source.to": "收件人",
 	"source.unavailable": "不可用",
+	"storage.title": "存储",
+	"storage.unlimited": "无限制",
 	"template.content": "内容",
 	"template.delete": "删除模板",
 	"template.menu": "模板",

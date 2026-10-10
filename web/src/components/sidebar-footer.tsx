@@ -1,23 +1,91 @@
 "use client";
 
-import { Keyboard, LogOut } from "lucide-react";
+import { HardDrive, Keyboard, LogOut } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { useMailboxStorage } from "@/hooks/use-mailbox-storage";
 import { signOut } from "@/lib/api/session";
 import { LOGIN_PATH } from "@/lib/api/session-utils";
+import { cn } from "@/lib/utils";
 import { useLanguage } from "./language-provider";
+import { useSelectedMailbox } from "./mailbox-provider";
 import { useShortcuts } from "./shortcuts";
+import { storageLabel, storagePercent } from "./sidebar-footer-utils";
 import { useSidebar } from "./sidebar-state";
+import { Tooltip } from "./ui/tooltip";
 
+/** Sidebar footer: the mailbox storage meter, quick keys and the account menu. */
 export function SidebarFooter() {
 	const { t } = useLanguage();
 	const router = useRouter();
 	const { minimal } = useSidebar();
+	const { selectedMailbox, isLoading } = useSelectedMailbox();
+	const storage = useMailboxStorage(selectedMailbox?.id, !isLoading);
 	const { openHelpModal, shortcutsEnabled, shortcutsPreferenceLoading } =
 		useShortcuts();
-	if (minimal) return null;
+
+	const label = storage
+		? storageLabel(
+				storage.usedBytes,
+				storage.quotaBytes,
+				t("storage.unlimited"),
+			)
+		: null;
+	const percent = storage
+		? storagePercent(storage.usedBytes, storage.quotaBytes)
+		: null;
+
+	// The icon rail has no room for the meter; keep the tooltip instead.
+	if (minimal) {
+		return label ? (
+			<Tooltip
+				label={`${t("storage.title")}: ${label}`}
+				placement="right"
+				className="w-full justify-center"
+			>
+				<span className="flex h-8 w-8 items-center justify-center rounded-full text-neutral-500">
+					<HardDrive className="h-4 w-4 text-neutral-400" />
+				</span>
+			</Tooltip>
+		) : null;
+	}
 
 	return (
 		<div className="px-3 pt-3 flex flex-col gap-2">
+			{label ? (
+				<div className="rounded-lg bg-neutral-100 px-2.5 py-2">
+					<div className="flex items-center justify-between gap-2 text-xs text-neutral-500">
+						<span className="flex items-center gap-1.5">
+							<HardDrive className="h-3.5 w-3.5 text-neutral-400" />
+							{t("storage.title")}
+						</span>
+						<span
+							className="truncate font-medium text-neutral-700 tabular-nums"
+							title={label}
+						>
+							{label}
+						</span>
+					</div>
+					{percent !== null ? (
+						<div
+							role="progressbar"
+							aria-valuemin={0}
+							aria-valuemax={100}
+							aria-valuenow={percent}
+							aria-label={`${t("storage.title")}: ${label}`}
+							className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-neutral-200"
+						>
+							<div
+								className={cn(
+									"h-full rounded-full transition-[width] duration-200",
+									percent >= 90 ? "bg-red-500" : "bg-blue-500",
+								)}
+								style={{ width: `${percent}%` }}
+							/>
+						</div>
+					) : null}
+				</div>
+			) : null}
+
 			{shortcutsEnabled && !shortcutsPreferenceLoading && (
 				<button
 					type="button"

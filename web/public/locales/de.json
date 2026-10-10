@@ -376,6 +376,8 @@
 	"source.title": "Originalnachricht",
 	"source.to": "An",
 	"source.unavailable": "Nicht verfügbar",
+	"storage.title": "Speicher",
+	"storage.unlimited": "Unbegrenzt",
 	"template.content": "Inhalt",
 	"template.delete": "Vorlage löschen",
 	"template.menu": "Vorlage",

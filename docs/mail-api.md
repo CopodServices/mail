@@ -43,10 +43,16 @@ Tenant lifecycle, behind the API key:
 | GET | /api/domains/{name} | One domain |
 | PATCH | /api/domains/{name} | Set {active}; a disabled tenant stops sending and receiving |
 | DELETE | /api/domains/{name} | Remove a domain and its mailboxes |
-| GET | /api/mailboxes | List mailboxes (?domain=<name> filters) |
+| GET | /api/mailboxes | List mailboxes with `used_bytes` and `quota_bytes` (?domain=<name> filters) |
 | POST | /api/mailboxes | Create a mailbox ({address, password}) |
 | PATCH | /api/mailboxes/{address} | {signature, display_name, password, quota_bytes, active} |
 | DELETE | /api/mailboxes/{address} | Delete a mailbox |
+
+Every mailbox reports its storage as `used_bytes` (the sum of its stored message
+sizes) and `quota_bytes` (0 for unlimited) on `GET /api/mailboxes` and the
+create/update responses; the webmail footer shows the meter. An inbound message
+that would push a mailbox past its quota is refused with a temporary 451 and
+stores nothing, so the sender retries later.
 
 DKIM is not part of this API: the configured relay signs outbound mail, so each
 tenant domain publishes the authentication records that provider asks for

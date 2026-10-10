@@ -376,6 +376,8 @@
 	"source.title": "الرسالة الأصلية",
 	"source.to": "إلى",
 	"source.unavailable": "غير متاح",
+	"storage.title": "المساحة",
+	"storage.unlimited": "غير محدود",
 	"template.content": "المحتوى",
 	"template.delete": "حذف القالب",
 	"template.menu": "قالب",

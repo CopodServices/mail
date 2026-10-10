@@ -376,6 +376,8 @@
 	"source.title": "Mensagem original",
 	"source.to": "Para",
 	"source.unavailable": "Indisponível",
+	"storage.title": "Armazenamento",
+	"storage.unlimited": "Ilimitado",
 	"template.content": "Conteúdo",
 	"template.delete": "Excluir modelo",
 	"template.menu": "Modelo",

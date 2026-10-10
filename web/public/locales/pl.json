@@ -376,6 +376,8 @@
 	"source.title": "Oryginalna wiadomość",
 	"source.to": "Do",
 	"source.unavailable": "Niedostępne",
+	"storage.title": "Pamięć",
+	"storage.unlimited": "Bez limitu",
 	"template.content": "Treść",
 	"template.delete": "Usuń szablon",
 	"template.menu": "Szablon",

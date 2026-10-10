@@ -376,6 +376,8 @@
 	"source.title": "원본 메시지",
 	"source.to": "받는사람",
 	"source.unavailable": "사용할 수 없음",
+	"storage.title": "저장 공간",
+	"storage.unlimited": "무제한",
 	"template.content": "내용",
 	"template.delete": "템플릿 삭제",
 	"template.menu": "템플릿",

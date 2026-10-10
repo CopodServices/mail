@@ -376,6 +376,8 @@
 	"source.title": "元のメッセージ",
 	"source.to": "宛先",
 	"source.unavailable": "利用不可",
+	"storage.title": "ストレージ",
+	"storage.unlimited": "無制限",
 	"template.content": "内容",
 	"template.delete": "テンプレートを削除",
 	"template.menu": "テンプレート",

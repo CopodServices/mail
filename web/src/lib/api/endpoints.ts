@@ -1,5 +1,5 @@
 import { apiFetch } from "@/lib/api/client";
-import type { BulkMessageAction } from "./types";
+import type { BulkMessageAction, MailboxStorage } from "./types";
 
 /**
  * Typed helpers for the mail API's write endpoints, built on the transport in
@@ -129,6 +129,23 @@ export async function createFolder(
 	const body = (await response.json()) as { data?: ApiFolder };
 	if (!body.data) throw new Error("Unable to create folder");
 	return body.data;
+}
+
+/**
+ * Storage used and the quota for every mailbox the caller can see — one, for a
+ * signed-in session (the API scopes the list to the session's own mailbox).
+ */
+export async function fetchMailboxStorage(): Promise<MailboxStorage[]> {
+	const response = await apiFetch("/api/mailboxes");
+	if (!response.ok) throw new Error("Unable to load mailbox storage");
+	const body = (await response.json()) as {
+		data?: Array<{ id: string; used_bytes?: number; quota_bytes?: number }>;
+	};
+	return (body.data ?? []).map((mailbox) => ({
+		mailboxId: mailbox.id,
+		usedBytes: mailbox.used_bytes ?? 0,
+		quotaBytes: mailbox.quota_bytes ?? 0,
+	}));
 }
 
 type ApiDraftAttachment = {

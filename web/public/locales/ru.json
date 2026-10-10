@@ -376,6 +376,8 @@
 	"source.title": "Исходное сообщение",
 	"source.to": "Кому",
 	"source.unavailable": "Недоступно",
+	"storage.title": "Хранилище",
+	"storage.unlimited": "Без ограничений",
 	"template.content": "Содержимое",
 	"template.delete": "Удалить шаблон",
 	"template.menu": "Шаблон",

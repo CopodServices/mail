@@ -47,7 +47,8 @@ flowchart LR
   message is parsed (mail-parser), authenticated (SPF/DKIM/DMARC via mail-auth),
   written to S3 and indexed in PostgreSQL. A DMARC failure with a rejecting
   policy is refused with 550; a quarantining policy stores the message with
-  status quarantined.
+  status quarantined. A mailbox at its `quota_bytes` limit refuses the message
+  with a temporary 451 and stores nothing, so the sender retries later.
 - **Submission (:2587 locally, :587 in production)** — requires AUTH (PLAIN or
   LOGIN, argon2 password hashes) and the envelope sender must match the
   authenticated mailbox. Mail to a local mailbox is stored; anything else is
@@ -120,7 +121,7 @@ examples below run.
 | DELETE | /api/messages/{id} | Remove the row and the stored object |
 | GET | /api/folders | System and custom folders for a mailbox |
 | POST | /api/folders | Create a custom folder ({mailbox_id, name, color}) |
-| GET | /api/mailboxes | List mailboxes (a session sees only its own; ?domain=<name> filters) |
+| GET | /api/mailboxes | List mailboxes with `used_bytes` and `quota_bytes` (a session sees only its own; ?domain=<name> filters) |
 | POST | /api/mailboxes | Create a mailbox ({address, password}) |
 | DELETE | /api/mailboxes/{address} | Delete a mailbox |
 | PATCH | /api/mailboxes/{address} | {signature, display_name, password, quota_bytes, active}; a session may set only its own signature and display name |

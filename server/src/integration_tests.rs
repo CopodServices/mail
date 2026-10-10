@@ -287,6 +287,116 @@ async fn relays_submission_through_the_smarthost() {
         .await;
 }
 
+/// A full mailbox refuses further inbound mail with a temporary failure and
+/// stores nothing, while a message that still fits is accepted and counted.
+#[tokio::test]
+async fn enforces_the_mailbox_storage_quota() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    let config = Arc::new(test_config());
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let store = MailStore::new(&config.s3).expect("object store");
+
+    let domain = format!("quota-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let address = format!("full@{domain}");
+    let mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
+    // A deliberately tiny quota so a normal message overshoots it.
+    repo::update_mailbox(&db, &address, None, None, None, Some(400), None)
+        .await
+        .unwrap();
+
+    let state = AppState {
+        db: db.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        authenticator: None,
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(smtp::serve(listener, state.clone(), Mode::Inbound));
+
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+
+    assert_eq!(read_reply(&mut reader).await, 220);
+    command(&mut write_half, "EHLO client.example.test").await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+
+    // A message larger than the quota is temp-failed and leaves nothing stored.
+    command(&mut write_half, "MAIL FROM:<sender@remote.test>").await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, &format!("RCPT TO:<{address}>")).await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, "DATA").await;
+    assert_eq!(read_reply(&mut reader).await, 354);
+    let filler = "x".repeat(600);
+    write_half
+        .write_all(&wire(&[
+            "From: Alice <alice@remote.test>",
+            "To: full",
+            "Subject: Too big",
+            "",
+            filler.as_str(),
+            ".",
+        ]))
+        .await
+        .unwrap();
+    write_half.flush().await.unwrap();
+    assert_eq!(read_reply(&mut reader).await, 451);
+    assert_eq!(repo::mailbox_usage_bytes(&db, mailbox.id).await.unwrap(), 0);
+
+    // A message that fits is accepted and adds to the usage.
+    command(&mut write_half, "MAIL FROM:<sender@remote.test>").await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, &format!("RCPT TO:<{address}>")).await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, "DATA").await;
+    assert_eq!(read_reply(&mut reader).await, 354);
+    write_half
+        .write_all(&wire(&[
+            "From: Alice <alice@remote.test>",
+            "To: full",
+            "Subject: Fits",
+            "",
+            "hi",
+            ".",
+        ]))
+        .await
+        .unwrap();
+    write_half.flush().await.unwrap();
+    assert_eq!(read_reply(&mut reader).await, 250);
+    assert!(repo::mailbox_usage_bytes(&db, mailbox.id).await.unwrap() > 0);
+
+    command(&mut write_half, "QUIT").await;
+    assert_eq!(read_reply(&mut reader).await, 221);
+
+    // Clean up the fixtures.
+    let stored = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox.id))
+        .all(&db)
+        .await
+        .unwrap();
+    for message in &stored {
+        let _ = store.delete(&message.storage_key).await;
+        let _ = repo::delete_message(&db, message.id).await;
+    }
+    let _ = repo::delete_mailbox(&db, &address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
 fn base64_plain(address: &str, password: &str) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(format!("\0{address}\0{password}"))

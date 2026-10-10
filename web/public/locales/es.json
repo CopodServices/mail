@@ -376,6 +376,8 @@
 	"source.title": "Mensaje original",
 	"source.to": "Para",
 	"source.unavailable": "No disponible",
+	"storage.title": "Almacenamiento",
+	"storage.unlimited": "Ilimitado",
 	"template.content": "Contenido",
 	"template.delete": "Eliminar plantilla",
 	"template.menu": "Plantilla",
