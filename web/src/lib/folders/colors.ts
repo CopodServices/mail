@@ -1,6 +1,6 @@
 import type { FolderColorOption } from "./types";
 
-export const FOLDER_COLOR_VALUES = [
+const FOLDER_COLOR_VALUES = [
 	"#2563eb",
 	"#7c3aed",
 	"#db2777",

@@ -14,19 +14,8 @@ export type BulkMessageAction =
 	| "folder"
 	| "delete";
 
-export type BulkMessagePayload = {
-	messageIds?: string[];
-	action?: BulkMessageAction;
-	folderId?: string;
-};
-
 /** Folders whose messages can be permanently deleted or emptied in one go. */
 export type PermanentDeleteFolder = "trash" | "spam";
-
-export type EmptyFolderPayload = {
-	mailboxId?: string;
-	folder?: PermanentDeleteFolder;
-};
 
 export type EmptyFolderResponse = {
 	ok?: boolean;
@@ -38,13 +27,4 @@ export type EmptyFolderResponse = {
 export type MessageNavigationEntry = {
 	id: string;
 	unread: boolean;
-};
-
-export type MessageNavigationResponse = {
-	messages: MessageNavigationEntry[];
-};
-
-export type TrashRetentionSettingsResponse = {
-	days?: number | null;
-	error?: unknown;
 };

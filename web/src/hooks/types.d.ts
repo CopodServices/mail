@@ -1,4 +1,4 @@
-export type MessageStatus =
+type MessageStatus =
 	| "received"
 	| "sent"
 	| "draft"
@@ -77,13 +77,7 @@ export type ThreadMessage = Message & {
 	}>;
 };
 
-export type ThreadResponse = {
-	threadId: string | null;
-	messages?: ThreadMessage[];
-	error?: string;
-};
-
-export type MessageReadFilter = "all" | "read" | "unread";
+type MessageReadFilter = "all" | "read" | "unread";
 
 export type MessageFilterOptions = {
 	query?: string;

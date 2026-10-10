@@ -17,7 +17,6 @@ import {
 	normalizeEmailAddress,
 	splitEmailAddressList,
 } from "@/lib/email/address";
-import { getLatestEmailContent } from "@/lib/email/reply-content-utils";
 import { bulkMessageAction } from "@/lib/mail-api/client";
 import type { BulkMessageAction } from "@/lib/mail-api/types";
 import { formatUserDate } from "@/lib/time/utils";
@@ -105,23 +104,10 @@ export function getMessageActionRedirect(action: BulkMessageAction) {
 	return null;
 }
 
-export function buildReplySubject(subject: string | null | undefined) {
+function buildReplySubject(subject: string | null | undefined) {
 	const trimmed = (subject ?? "").trim();
 	if (!trimmed) return "Re:";
 	return /^re:/i.test(trimmed) ? trimmed : `Re: ${trimmed}`;
-}
-
-export function buildReplyQuote(
-	senderAddress: string,
-	bodyText: string | null | undefined,
-) {
-	const latest = getLatestEmailContent(bodyText).trim();
-	if (!latest) return "";
-	const quoted = latest
-		.split("\n")
-		.map((line) => `> ${line}`)
-		.join("\n");
-	return `\n\n${getEmailAddress(senderAddress)} wrote:\n${quoted}\n`;
 }
 
 const QUOTE_STYLE =
@@ -131,7 +117,7 @@ const QUOTE_STYLE =
  * The folded quote under a reply: the "On <date>, <sender> wrote:" line every
  * client recognises, then the original as HTML (sanitised) or as text.
  */
-export function buildReplyQuoteHtml(
+function buildReplyQuoteHtml(
 	senderAddress: string,
 	sentAt: string | null | undefined,
 	bodyText: string | null | undefined,
@@ -221,14 +207,14 @@ export function getReplyThreading(message: ReplyableMessage) {
 	};
 }
 
-export function buildForwardSubject(subject: string | null | undefined) {
+function buildForwardSubject(subject: string | null | undefined) {
 	const trimmed = (subject ?? "").trim();
 	if (!trimmed) return "Fwd:";
 	return /^fwd?:/i.test(trimmed) ? trimmed : `Fwd: ${trimmed}`;
 }
 
 /** The header block mail clients put above a forwarded message, as folded HTML. */
-export function buildForwardHtml(
+function buildForwardHtml(
 	message: ForwardDraftInput["message"],
 	bodyText: string | null | undefined,
 	bodyHtml: string | null | undefined,

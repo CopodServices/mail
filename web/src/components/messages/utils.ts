@@ -42,7 +42,7 @@ export function getMessageParty(
 }
 
 /** "Maya Chen, +2" for a multi-recipient message, or just the one name. */
-export function formatRecipientSummary(
+function formatRecipientSummary(
 	toAddr: string,
 	firstContactName?: string | null,
 	t: Translator = defaultTranslator,
@@ -115,7 +115,7 @@ export function getMailboxAddress(
 	return `${mailbox.localPart}@${mailbox.hostname}`;
 }
 
-export function getEmailPageTitleCount(total: number, unread: number): number {
+function getEmailPageTitleCount(total: number, unread: number): number {
 	return unread > 0 ? unread : total;
 }
 

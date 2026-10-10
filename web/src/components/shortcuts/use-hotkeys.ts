@@ -7,7 +7,7 @@ interface UseHotkeysOptions {
 	enabled?: boolean;
 }
 
-export function isTypingInInput(target: EventTarget | null): boolean {
+function isTypingInInput(target: EventTarget | null): boolean {
 	if (!target || !(target instanceof HTMLElement)) return false;
 	const tagName = target.tagName.toUpperCase();
 	const isInputOrTextarea =

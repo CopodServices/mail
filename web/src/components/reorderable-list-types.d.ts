@@ -1,11 +1,11 @@
 import type { ReactNode } from "react";
 
-export type ReorderableItem = {
+type ReorderableItem = {
 	id: string;
 	node: ReactNode;
 };
 
-export type ReorderableListSpec = {
+type ReorderableListSpec = {
 	id: string;
 	items: ReorderableItem[];
 	/** Row rendered above this list (e.g. a "More..." toggle). Dropping on it moves items between this list and the previous one. */

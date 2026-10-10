@@ -6,19 +6,6 @@ let mailboxesRequest: Promise<MailboxOption[]> | null = null;
 let cacheGeneration = 0;
 export const SELECTED_MAILBOX_STORAGE_KEY = "selected-mailbox-id";
 
-export function clearMailboxesCache() {
-	cacheGeneration += 1;
-	mailboxesCache = null;
-	mailboxesRequest = null;
-}
-
-export function clearMailboxClientState() {
-	clearMailboxesCache();
-	if (typeof window !== "undefined") {
-		localStorage.removeItem(SELECTED_MAILBOX_STORAGE_KEY);
-	}
-}
-
 export async function fetchMailboxOptions(
 	force = false,
 ): Promise<MailboxOption[]> {

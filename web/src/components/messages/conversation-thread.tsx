@@ -137,7 +137,7 @@ export function ConversationThread({
 	);
 }
 
-export function ConversationMessageCard({
+function ConversationMessageCard({
 	message,
 	mailboxId,
 	currentAccountName,

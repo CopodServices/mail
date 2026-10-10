@@ -144,10 +144,7 @@ export function getMessageBodyDisplay(
 	};
 }
 
-export function getAttachmentUrl(
-	messageId: string,
-	attachmentId: string,
-): string {
+function getAttachmentUrl(messageId: string, attachmentId: string): string {
 	return `/api/messages/${messageId}/attachments/${attachmentId}?preview=1`;
 }
 

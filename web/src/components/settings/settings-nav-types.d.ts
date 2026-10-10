@@ -1,6 +1,6 @@
 import type { TranslationKey } from "@/lib/i18n/types";
 
-export type SettingsNavItem = {
+type SettingsNavItem = {
 	href: string;
 	labelKey: TranslationKey;
 };

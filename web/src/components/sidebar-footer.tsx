@@ -40,7 +40,7 @@ export function SidebarFooter() {
  * than in the product surface. The link keeps the AGPL-3.0 section 13
  * network-source obligation satisfied.
  */
-export function PoweredBy({ className = "px-1" }: { className?: string }) {
+function PoweredBy({ className = "px-1" }: { className?: string }) {
 	const sourceUrl =
 		process.env.NEXT_PUBLIC_SOURCE_URL ??
 		"https://github.com/copodservices/mail";

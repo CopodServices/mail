@@ -1,6 +1,6 @@
 export type ThemePreference = "light" | "dark" | "system";
 
-export const THEME_STORAGE_KEY = "copod-theme";
+const THEME_STORAGE_KEY = "copod-theme";
 export const THEME_CHANGED_EVENT = "copod:theme-changed";
 
 // Runs in <head> before paint, so the first frame already has the right theme (same approach as the
@@ -29,7 +29,7 @@ export function readThemePreference(): ThemePreference {
 	}
 }
 
-export function resolveTheme(preference: ThemePreference): "light" | "dark" {
+function resolveTheme(preference: ThemePreference): "light" | "dark" {
 	if (preference !== "system") return preference;
 	if (typeof window === "undefined") return "light";
 	return window.matchMedia("(prefers-color-scheme: dark)").matches

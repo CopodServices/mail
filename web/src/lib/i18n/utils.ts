@@ -4,7 +4,7 @@ import type { Locale, Messages, PluralKey, TranslationKey } from "./types";
 
 export { DEFAULT_LOCALE } from "./locales";
 export const LOCALE_COOKIE = "copod-locale";
-export const LOCALE_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
+const LOCALE_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
 
 export function resolveLocale(value: unknown): Locale {
 	return typeof value === "string" && Object.hasOwn(locales, value)
@@ -17,7 +17,7 @@ export function getDirection(locale: Locale): "ltr" | "rtl" {
 }
 
 /** Reads a static asset by path. The browser uses `fetch`; server code passes the `ASSETS` binding. */
-export type AssetReader = (path: string) => Promise<Response>;
+type AssetReader = (path: string) => Promise<Response>;
 
 /** Fetches the catalog for a locale; English is already bundled, others load on demand from `public/locales`. */
 export async function loadMessages(
@@ -33,10 +33,7 @@ export async function loadMessages(
 	return response.json();
 }
 
-export type TranslationVars = Record<
-	string,
-	string | number | null | undefined
->;
+type TranslationVars = Record<string, string | number | null | undefined>;
 export type Translator = (
 	key: TranslationKey | PluralKey,
 	vars?: TranslationVars,
@@ -49,7 +46,7 @@ function interpolate(template: string, vars?: TranslationVars): string {
 	);
 }
 
-export function translate(
+function translate(
 	messages: Partial<Messages>,
 	key: TranslationKey,
 	vars?: TranslationVars,

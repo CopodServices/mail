@@ -1,5 +1,3 @@
-import type { ZonedDay } from "./types";
-
 const fieldFormatters = new Map<string, Intl.DateTimeFormat>();
 
 function getFieldFormatter(timeZone: string): Intl.DateTimeFormat {
@@ -31,7 +29,7 @@ export function normalizeTimeZone(value?: string | null): string {
 	}
 }
 
-export function isValidTimeZone(value: string): boolean {
+function isValidTimeZone(value: string): boolean {
 	try {
 		new Intl.DateTimeFormat("en-US", { timeZone: value });
 		return true;
@@ -58,19 +56,8 @@ export function getUserTimeZone(): string {
 	return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
-export function getRequestTimeZone(
-	request: Request,
-	preferredTimeZone?: string | null,
-): string {
-	return normalizeTimeZone(
-		preferredTimeZone ??
-			new URL(request.url).searchParams.get("timeZone") ??
-			request.headers.get("X-Time-Zone"),
-	);
-}
-
 /** The interface language the language provider keeps on `<html lang>`; the browser default when unset or on the server. */
-export function getDisplayLocale(): string | undefined {
+function getDisplayLocale(): string | undefined {
 	if (typeof document === "undefined") return undefined;
 	return document.documentElement.lang || undefined;
 }
@@ -145,24 +132,4 @@ export function dateFromZonedFields(fields: Date, timeZone: string): Date {
 		) ??
 		candidates[candidates.length - 1]
 	);
-}
-
-export function recentZonedDays(
-	timeZone: string,
-	count: number,
-	now = new Date(),
-): ZonedDay[] {
-	const today = zonedDateFields(now, timeZone);
-	today.setUTCHours(0, 0, 0, 0);
-	return Array.from({ length: count }, (_, index) => {
-		const day = new Date(today);
-		day.setUTCDate(day.getUTCDate() - count + 1 + index);
-		const next = new Date(day);
-		next.setUTCDate(next.getUTCDate() + 1);
-		return {
-			date: day.toISOString().slice(0, 10),
-			start: dateFromZonedFields(day, timeZone),
-			end: dateFromZonedFields(next, timeZone),
-		};
-	});
 }

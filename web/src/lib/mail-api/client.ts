@@ -56,7 +56,7 @@ export async function bulkMessageAction(
 	if (!response.ok) throw new Error("Unable to update messages");
 }
 
-export type SendMessageInput = {
+type SendMessageInput = {
 	from: string;
 	to: string[];
 	cc?: string[];
@@ -99,7 +99,7 @@ export async function sendMessage(input: SendMessageInput): Promise<{
 	return body.data ?? { stored: 0, queued: 0, scheduled: false };
 }
 
-export type ApiFolder = {
+type ApiFolder = {
 	id: string;
 	name: string;
 	kind: string;
@@ -130,14 +130,14 @@ export async function createFolder(
 	return body.data;
 }
 
-export type ApiDraftAttachment = {
+type ApiDraftAttachment = {
 	index: number;
 	filename: string | null;
 	content_type: string | null;
 	size_bytes: number;
 };
 
-export type ApiDraft = {
+type ApiDraft = {
 	id: string;
 	mailbox_id: string | null;
 	from: string;

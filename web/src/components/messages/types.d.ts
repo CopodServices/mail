@@ -75,7 +75,7 @@ export type BulkMessageToolbarProps = {
 
 export type SelectedMessage = Pick<Message, "id" | "read">;
 
-export type MessageSelectionControl = {
+type MessageSelectionControl = {
 	selectedMessages: SelectedMessage[];
 	setSelectedMessages: Dispatch<SetStateAction<SelectedMessage[]>>;
 };

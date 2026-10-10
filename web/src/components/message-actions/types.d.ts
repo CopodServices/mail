@@ -36,12 +36,6 @@ export type ForwardDraftInput = {
 	bodyHtml?: string | null;
 };
 
-export type SingleMessageAction =
-	| BulkMessageAction
-	| "reply"
-	| "replyAll"
-	| "forward";
-
 export type ReplyMode = "reply" | "replyAll";
 
 export type ReplyableMessage = Pick<
@@ -74,16 +68,6 @@ export type ReplyDraftInput = {
 		references: string | null;
 		threadId: string | null;
 	};
-};
-
-export type TrashSenderRuleInput = {
-	mailboxId: string;
-	senderAddress: string;
-};
-
-export type BlockMessageContactInput = {
-	mailboxId: string;
-	senderAddress: string;
 };
 
 export type MoveMessageActionItem = {

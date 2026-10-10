@@ -13,7 +13,7 @@ import type {
  * so the UI stays unchanged while the boundary matches the API.
  */
 
-export type ApiMessage = {
+type ApiMessage = {
 	id: string;
 	mailbox_id: string | null;
 	direction: "inbound" | "outbound";
@@ -31,12 +31,12 @@ export type ApiMessage = {
 	snoozed_until?: string | null;
 };
 
-export type ApiMessageList = {
+type ApiMessageList = {
 	data?: ApiMessage[];
 	meta?: { total?: number; limit?: number; offset?: number };
 };
 
-export type ApiCounts = {
+type ApiCounts = {
 	data?: {
 		folders?: Record<string, FolderCount>;
 		custom_folders?: Record<string, FolderCount>;
@@ -44,14 +44,14 @@ export type ApiCounts = {
 	};
 };
 
-export type ApiAttachment = {
+type ApiAttachment = {
 	index: number;
 	filename: string | null;
 	content_type: string | null;
 	size_bytes: number;
 };
 
-export type ApiMessageDetail = {
+type ApiMessageDetail = {
 	data?: {
 		message?: ApiMessage;
 		text?: string | null;
@@ -61,7 +61,7 @@ export type ApiMessageDetail = {
 	};
 };
 
-export function toMessage(dto: ApiMessage): Message {
+function toMessage(dto: ApiMessage): Message {
 	return {
 		id: dto.id,
 		userId: dto.mailbox_id ?? "",

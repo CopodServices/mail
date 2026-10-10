@@ -9,12 +9,12 @@ import {
 	zonedDateFields,
 } from "@/lib/time/utils";
 
-export type SnoozePreset = {
+type SnoozePreset = {
 	labelKey: TranslationKey;
 	value: string;
 };
 
-export function formatSnoozeDateTime(date: Date): string {
+function formatSnoozeDateTime(date: Date): string {
 	return formatUserDateTimeLocal(date);
 }
 

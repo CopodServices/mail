@@ -8,7 +8,6 @@ import { cn } from "@/lib/utils";
 
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
-export const DialogClose = DialogPrimitive.Close;
 
 export function DialogContent({
 	className,

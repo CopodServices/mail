@@ -1,4 +1,3 @@
-import type { Address, Mailbox } from "postal-mime";
 import type { EmailAddressParts } from "@/lib/email/address-types";
 import { parseAddress } from "@/lib/utils";
 
@@ -45,40 +44,6 @@ export function getEmailDisplayName(value: string): string {
 
 	const parsed = parseAddress(parts.address);
 	return parsed?.local || parts.address;
-}
-
-export function formatPostalAddress(
-	address: Address | undefined,
-	fallback: string | null,
-): string | null {
-	const [mailbox] = getPostalMailboxes(address);
-	if (!mailbox?.address) return fallback;
-
-	return formatEmailAddress(mailbox.address, mailbox.name);
-}
-
-/**
- * Every mailbox in a header address list, formatted and comma-joined, so that a
- * message's full To/Cc line survives storage and reply-all can see it.
- */
-export function formatPostalAddressList(
-	addresses: Address[] | undefined,
-	fallback: string | null,
-): string | null {
-	const mailboxes = (addresses ?? [])
-		.flatMap(getPostalMailboxes)
-		.filter((item) => !!item.address);
-	if (mailboxes.length === 0) return fallback;
-
-	return mailboxes
-		.map((mailbox) => formatEmailAddress(mailbox.address, mailbox.name))
-		.join(", ");
-}
-
-function getPostalMailboxes(address: Address | undefined): Mailbox[] {
-	if (!address) return [];
-	if ("address" in address && address.address) return [address];
-	return address.group ?? [];
 }
 
 /**
@@ -129,11 +94,4 @@ export function joinEmailAddressList(values: string[]): string {
 		.map((value) => value.trim())
 		.filter(Boolean)
 		.join(", ");
-}
-
-/** The first address of a list, for places that show a single party. */
-export function getFirstEmailAddressEntry(
-	value: string | null | undefined,
-): string {
-	return splitEmailAddressList(value)[0] ?? (value ?? "").trim();
 }

@@ -14,7 +14,7 @@ import type {
  * against the full-text index. Only the read state is lifted out here so the
  * unread toggle and `is:unread` share one `read` parameter.
  */
-export function parseMessageSearchQuery(query: string): MessageFilterOptions {
+function parseMessageSearchQuery(query: string): MessageFilterOptions {
 	const parsed = parseSearchQuery(query);
 	const filters: MessageFilterOptions = {};
 	if (parsed.read) filters.read = parsed.read;
@@ -113,15 +113,6 @@ if (typeof window !== "undefined") {
 		clearMessageListCache();
 		clearMessageCountsCache();
 	});
-}
-
-export function clearMessageClientState() {
-	messageCacheGeneration += 1;
-	messageCountsGeneration += 1;
-	messageCountsCache.clear();
-	messageCountsRequests.clear();
-	messageListCache.clear();
-	messageListRequests.clear();
 }
 
 export async function fetchMessageCounts(

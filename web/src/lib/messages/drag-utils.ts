@@ -1,6 +1,6 @@
 import type { MessageDragPayload } from "./drag-types";
 
-export const MESSAGE_DRAG_MIME = "application/x-copod-message-ids";
+const MESSAGE_DRAG_MIME = "application/x-copod-message-ids";
 
 export function setMessageDragData(
 	dataTransfer: DataTransfer,

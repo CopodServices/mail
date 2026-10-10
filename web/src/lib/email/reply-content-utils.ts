@@ -73,12 +73,6 @@ export function splitRepliedEmailContent(
 	return { latestContent: normalizeContent(content).trim(), quotedContent: [] };
 }
 
-export function getLatestEmailContent(
-	content: string | null | undefined,
-): string {
-	return splitRepliedEmailContent(content).latestContent;
-}
-
 export function htmlToReadableText(html: string | null | undefined): string {
 	return (html ?? "")
 		.replace(/<(style|script|head)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")

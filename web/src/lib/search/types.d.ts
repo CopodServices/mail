@@ -14,5 +14,3 @@ export type ParsedSearchQuery = {
 	/** True when anything in the query needs the full-text index. */
 	needsFullText: boolean;
 };
-
-export type SearchToken = { term: string; negate: boolean; phrase: boolean };

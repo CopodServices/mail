@@ -28,7 +28,6 @@
 		"next": "16.3.3",
 		"parse-srcset": "^1.0.2",
 		"parse5": "^8.0.1",
-		"postal-mime": "^2.7.4",
 		"react": "^19.2.6",
 		"react-dom": "^19.2.6",
 		"tailwind-merge": "^3.6.0"

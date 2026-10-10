@@ -1,5 +1,5 @@
 import { dateFromZonedFields, normalizeTimeZone } from "@/lib/time/utils";
-import type { ParsedSearchQuery, SearchToken } from "./types";
+import type { ParsedSearchQuery } from "./types";
 
 /**
  * Gmail-style search grammar shared by the search box and the API:
@@ -90,84 +90,4 @@ function parseDate(value: string, timeZone: string): Date | undefined {
 	)
 		return undefined;
 	return dateFromZonedFields(date, normalizeTimeZone(timeZone));
-}
-
-/** Split free text into phrases ("..."), negations (-word) and plain terms. */
-export function tokenizeSearchText(text: string): SearchToken[] {
-	const tokens: SearchToken[] = [];
-	const re = /(-?)"([^"]+)"|(-?)(\S+)/g;
-	let match: RegExpExecArray | null;
-	while ((match = re.exec(text))) {
-		if (match[2] !== undefined) {
-			const term = match[2].trim();
-			if (term) tokens.push({ term, negate: match[1] === "-", phrase: true });
-		} else {
-			const term = match[4].replace(/^-+/, "").trim();
-			if (term) tokens.push({ term, negate: match[3] === "-", phrase: false });
-		}
-	}
-	return tokens;
-}
-
-/** FTS5 string literal: double quotes doubled, so user input can never alter the query grammar. */
-function ftsString(value: string): string {
-	return `"${value.replace(/"/g, '""')}"`;
-}
-
-/**
- * One term. Phrases match whole words; plain terms match by prefix so "inv"
- * finds "invoice". Punctuation FTS5 treats as separators is normalised to
- * spaces first, so "maya@acme.test" becomes the phrase "maya acme test".
- */
-function ftsTerm(term: string, phrase: boolean): string {
-	const cleaned = term
-		.replace(/[^\p{L}\p{N}\s]+/gu, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-	if (!cleaned) return "";
-	if (phrase || cleaned.includes(" ")) {
-		// A multi-word prefix query needs the last word starred, which FTS5 only
-		// allows inside a phrase as `"a b" *`; keep it simple and require whole words.
-		return ftsString(cleaned);
-	}
-	return `${ftsString(cleaned)}*`;
-}
-
-/**
- * Build the FTS5 MATCH expression. Column filters restrict a term to one
- * column; free text is ANDed across the whole row. Returns null when there is
- * nothing to match, so callers skip the index entirely.
- */
-export function buildFtsMatch(parsed: ParsedSearchQuery): string | null {
-	const parts: string[] = [];
-
-	for (const token of tokenizeSearchText(parsed.text)) {
-		const expr = ftsTerm(token.term, token.phrase);
-		if (!expr) continue;
-		parts.push(token.negate ? `NOT ${expr}` : expr);
-	}
-	const column = (name: string, value: string | undefined) => {
-		if (!value) return;
-		const terms = tokenizeSearchText(value)
-			.map((token) => ftsTerm(token.term, token.phrase))
-			.filter(Boolean);
-		if (terms.length === 0) return;
-		parts.push(`${name} : (${terms.join(" AND ")})`);
-	};
-	column("subject", parsed.subject);
-	column("from_addr", parsed.from);
-	column("{to_addr cc_addr}", parsed.to);
-
-	if (parts.length === 0) return null;
-	// FTS5 has no unary NOT: "a NOT b" is binary. A leading negation is turned
-	// into "match anything" minus the term.
-	const positives = parts.filter((part) => !part.startsWith("NOT "));
-	const negatives = parts
-		.filter((part) => part.startsWith("NOT "))
-		.map((part) => part.slice(4));
-	const base =
-		positives.length > 0 ? positives.join(" AND ") : `${ftsString("")}*`;
-	return negatives.length > 0
-		? `(${base}) NOT (${negatives.join(" OR ")})`
-		: base;
 }

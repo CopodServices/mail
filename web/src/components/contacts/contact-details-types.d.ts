@@ -7,11 +7,6 @@ export type ContactDetailsRecord = {
 	lastSeenAt: string | null;
 };
 
-export type ContactDetailsResponse = {
-	contact?: ContactDetailsRecord;
-	error?: string;
-};
-
 export type ContactDetailsTriggerProps = {
 	mailboxId: string | null;
 	address: string;

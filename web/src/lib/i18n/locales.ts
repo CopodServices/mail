@@ -16,4 +16,3 @@ export const locales = {
 
 export type Locale = keyof typeof locales;
 export const DEFAULT_LOCALE = "en" satisfies Locale;
-export const supportedLocales = Object.keys(locales) as Locale[];

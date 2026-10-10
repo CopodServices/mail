@@ -6,7 +6,7 @@
 
 import { sanitizeEmailHtml } from "@/components/messages/message-detail/email-html-sanitizer";
 
-export const QUOTE_ATTRIBUTE = "data-copod-quote";
+const QUOTE_ATTRIBUTE = "data-copod-quote";
 const QUOTE_OPEN = `<div class="copod-quote" ${QUOTE_ATTRIBUTE}="1">`;
 const SIGNATURE_ATTRIBUTE = "data-copod-signature";
 
@@ -54,11 +54,11 @@ export function hasMeaningfulHtml(html: string): boolean {
 }
 
 /** Distinguish stored HTML markup from existing plain-text signatures. */
-export function isHtmlSignature(signature: string | null | undefined): boolean {
+function isHtmlSignature(signature: string | null | undefined): boolean {
 	return /<\/?[a-z][a-z0-9]*[\s>/]/i.test(signature ?? "");
 }
 
-export function signatureToHtml(signature: string | null | undefined): string {
+function signatureToHtml(signature: string | null | undefined): string {
 	const value = signature?.trim() ?? "";
 	if (!value) return "";
 	if (isHtmlSignature(value) && typeof DOMParser !== "undefined") {

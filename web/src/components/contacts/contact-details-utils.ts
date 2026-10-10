@@ -59,7 +59,3 @@ export async function updateContactName(
 		throw new Error(data.error ?? "Unable to update contact");
 	return toContactDetails(data.data);
 }
-
-export function getContactInitial(name: string, address: string): string {
-	return (name.trim() || getEmailAddress(address)).slice(0, 1).toUpperCase();
-}
