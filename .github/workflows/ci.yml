@@ -52,11 +52,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Lowercase repository
-        id: repo
-        uses: ASzc/change-string-case-action@v6
-        with:
-          string: ${{ github.repository }}
+      # Docker tags must be lowercase; GHCR rejects "CopodServices/mail".
+      - name: Image name
+        id: image
+        run: echo "repo=${GITHUB_REPOSITORY,,}" >> "${GITHUB_OUTPUT}"
 
       - name: Build information
         id: build_info
@@ -79,7 +78,7 @@ jobs:
           platforms: linux/amd64
           push: "${{ github.event_name == 'push' }}"
           tags: |
-            ghcr.io/${{ steps.repo.outputs.string }}:${{ steps.build_info.outputs.tag }}
-            ghcr.io/${{ steps.repo.outputs.string }}:latest
+            ghcr.io/${{ steps.image.outputs.repo }}:${{ steps.build_info.outputs.tag }}
+            ghcr.io/${{ steps.image.outputs.repo }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
