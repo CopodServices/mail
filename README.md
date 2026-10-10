@@ -48,7 +48,8 @@ flowchart LR
   written to S3 and indexed in PostgreSQL. A DMARC failure with a rejecting
   policy is refused with 550; a quarantining policy stores the message with
   status quarantined. A mailbox at its `quota_bytes` limit refuses the message
-  with a temporary 451 and stores nothing, so the sender retries later.
+  with a temporary 451 and stores nothing, so the sender retries later. A
+  mailbox with an auto-forward address queues a copy of every arrival to it.
 - **Submission (:2587 locally, :587 in production)** — requires AUTH (PLAIN or
   LOGIN, argon2 password hashes) and the envelope sender must match the
   authenticated mailbox. Mail to a local mailbox is stored; anything else is
@@ -107,7 +108,7 @@ examples below run.
 | GET | /api/messages/counts | Per-folder and per-mailbox totals and unread counts |
 | GET | /api/messages/{id} | Message with body (text/html) and the attachment list |
 | GET | /api/messages/{id}/raw | Raw RFC5322 message from S3 |
-| GET | /api/messages/{id}/attachments/{index} | One attachment by position |
+| GET | /api/messages/{id}/attachments/{index} | One attachment by position; `?preview=1` serves a renderable part inline for preview |
 | POST | /api/messages/{id}/read | Set read state ({read}) |
 | POST | /api/messages/{id}/star | Set starred state ({starred}) |
 | POST | /api/messages/{id}/snooze | Snooze until a time ({snoozed_until}) |
@@ -124,7 +125,7 @@ examples below run.
 | GET | /api/mailboxes | List mailboxes with `used_bytes` and `quota_bytes` (a session sees only its own; ?domain=<name> filters) |
 | POST | /api/mailboxes | Create a mailbox ({address, password}) |
 | DELETE | /api/mailboxes/{address} | Delete a mailbox |
-| PATCH | /api/mailboxes/{address} | {signature, display_name, password, quota_bytes, active}; a session may set only its own signature and display name |
+| PATCH | /api/mailboxes/{address} | {signature, display_name, forward_to, password, quota_bytes, active}; a session may set only its own signature, display name and forwarding address |
 | GET | /api/domains | List domains |
 | POST | /api/domains | Create a tenant domain (idempotent) |
 | GET | /api/domains/{name} | One domain |
@@ -133,6 +134,7 @@ examples below run.
 | GET | /api/attachment-policy | Attachment limits for the composer |
 | GET/POST | /api/templates, GET/DELETE /api/templates/{id} | Composer templates |
 | GET/PATCH | /api/settings/shortcuts, /api/settings/recipient-addresses | Client preferences |
+| GET | /api/settings/clients | Submission host, port, TLS mode and username for another mail app |
 | GET | /api/contacts | A contact for an address |
 | PATCH | /api/contacts | Rename a contact |
 | POST | /api/contacts/block | Block a sender |

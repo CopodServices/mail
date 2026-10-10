@@ -25,6 +25,7 @@ export async function fetchMailboxOptions(
 							active: boolean;
 							signature: string | null;
 							display_name: string | null;
+							forward_to: string | null;
 						}>;
 					}
 				).data ?? []
@@ -39,6 +40,7 @@ export async function fetchMailboxOptions(
 					// only the fallback for a mailbox that has not set one.
 					displayName: mailbox.display_name ?? localPart,
 					signature: mailbox.signature ?? null,
+					forwardTo: mailbox.forward_to ?? null,
 					hasAvatar: false,
 					type: "personal" as const,
 					isPrimary: false,

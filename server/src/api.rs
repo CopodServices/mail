@@ -137,6 +137,7 @@ fn send_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(send))
         .routes(routes!(attachment_policy))
+        .routes(routes!(get_client_connection))
         .routes(routes!(list_templates))
         .routes(routes!(create_template))
         .routes(routes!(get_template))
@@ -745,6 +746,8 @@ pub struct MailboxResponse {
     pub signature: Option<String>,
     /// The name recipients see beside the address in the From header.
     pub display_name: Option<String>,
+    /// Address every arriving message is copied to; absent when forwarding is off.
+    pub forward_to: Option<String>,
     /// Storage limit for the mailbox in bytes; 0 means unlimited.
     pub quota_bytes: i64,
     /// Bytes stored for the mailbox, summed across its messages.
@@ -760,6 +763,7 @@ impl MailboxResponse {
             created_at: model.created_at,
             signature: model.signature,
             display_name: model.display_name,
+            forward_to: model.forward_to,
             quota_bytes: model.quota_bytes,
             used_bytes,
         }
@@ -788,6 +792,11 @@ pub struct UpdateMailboxRequest {
     /// may set this on its own mailbox, alongside the signature.
     #[serde(default, deserialize_with = "double_option")]
     pub display_name: Option<Option<String>>,
+    /// Replaces the auto-forward address; explicit null turns forwarding off,
+    /// omitted leaves it unchanged. A mailbox session may set this on its own
+    /// mailbox, alongside the signature.
+    #[serde(default, deserialize_with = "double_option")]
+    pub forward_to: Option<Option<String>>,
     /// Operator only: rotate the mailbox password.
     #[serde(default)]
     pub password: Option<String>,
@@ -1632,13 +1641,94 @@ pub async fn bulk_messages(
     .into_response())
 }
 
+/// Query of the attachment endpoint. preview=1 asks for an inline response so
+/// the browser renders the part in place; anything else downloads it.
+#[derive(Debug, Default, Deserialize)]
+pub struct AttachmentQuery {
+    #[serde(default)]
+    preview: Option<String>,
+}
+
+impl AttachmentQuery {
+    fn preview_requested(&self) -> bool {
+        match self.preview.as_deref() {
+            Some(value) => !matches!(value, "" | "0" | "false" | "no"),
+            None => false,
+        }
+    }
+}
+
+/// Whether a preview may be rendered inline. Only the types the web client
+/// shows are served inline: HTML, SVG and XML can carry script, so they stay
+/// downloads and a preview URL can never run in the mail origin.
+fn inline_previewable(content_type: &str) -> bool {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if essence.starts_with("audio/") || essence.starts_with("video/") {
+        return true;
+    }
+    if essence.starts_with("image/") && essence != "image/svg+xml" {
+        return true;
+    }
+    matches!(
+        essence.as_str(),
+        "application/pdf" | "application/json" | "text/plain" | "text/csv"
+    )
+}
+
+/// The Content-Disposition value for a part: a quoted ASCII filename with the
+/// RFC 5987 UTF-8 form appended when the name is not plain ASCII.
+fn content_disposition(kind: &str, filename: &str) -> String {
+    let ascii: String = filename
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii() && !ch.is_ascii_control() {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let escaped = ascii.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut value = format!("{kind}; filename=\"{escaped}\"");
+    if !filename.is_ascii() {
+        value.push_str("; filename*=UTF-8''");
+        value.push_str(&percent_encode_utf8(filename));
+    }
+    value
+}
+
+/// RFC 5987 attr-char percent-encoding for the UTF-8 filename form.
+fn percent_encode_utf8(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.as_bytes() {
+        let ch = *byte as char;
+        if ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '!' | '#' | '$' | '&' | '+' | '-' | '.' | '^' | '_' | '\u{60}' | '|' | '~'
+            )
+        {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 #[utoipa::path(
     get,
     path = "/api/messages/{id}/attachments/{index}",
     tag = "messages",
     params(
         ("id" = Uuid, Path, description = "Message id"),
-        ("index" = usize, Path, description = "Attachment position from the message detail")
+        ("index" = usize, Path, description = "Attachment position from the message detail"),
+        ("preview" = Option<String>, Query, description = "Pass 1 to serve the part inline for in-place preview instead of download")
     ),
     responses(
         (status = 200, description = "Attachment bytes"),
@@ -1649,6 +1739,7 @@ pub async fn get_message_attachment(
     State(state): State<AppState>,
     principal: Principal,
     Path((id, index)): Path<(Uuid, usize)>,
+    Query(query): Query<AttachmentQuery>,
 ) -> Result<Response, ApiError> {
     let message = repo::get_message(&state.db, id)
         .await
@@ -1670,15 +1761,15 @@ pub async fn get_message_attachment(
     let filename = attachment
         .filename
         .unwrap_or_else(|| "attachment".to_string());
-    let disposition = format!("attachment; filename={}", filename.replace('"', ""));
+    let content_type = attachment
+        .content_type
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let inline = query.preview_requested() && inline_previewable(&content_type);
+    let disposition = content_disposition(if inline { "inline" } else { "attachment" }, &filename);
     Ok(Response::builder()
-        .header(
-            header::CONTENT_TYPE,
-            attachment
-                .content_type
-                .unwrap_or_else(|| "application/octet-stream".to_string()),
-        )
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_DISPOSITION, disposition)
+        .header("x-content-type-options", "nosniff")
         .body(Body::from(attachment.bytes))
         .expect("valid response"))
 }
@@ -2838,6 +2929,59 @@ pub async fn update_recipient_addresses_setting(
     .into_response())
 }
 
+/// The settings another mail app needs to send as this mailbox. Reading mail
+/// from a third-party client is not offered, so imap_supported is always false.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ClientConnectionResponse {
+    /// Submission host a mail app connects to.
+    pub smtp_host: String,
+    /// Submission port on that host.
+    pub smtp_port: u16,
+    /// "starttls" when the listener offers TLS, otherwise "none".
+    pub smtp_security: String,
+    /// Address to authenticate as; absent for the operator, who manages every mailbox.
+    pub username: Option<String>,
+    /// Reading mail from a third-party client is not supported yet.
+    pub imap_supported: bool,
+}
+
+/// The port the submission listener is bound to, read from its configured
+/// address, falling back to the registered submission port.
+fn submission_port(listen: &str) -> u16 {
+    listen
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(587)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/settings/clients",
+    tag = "send",
+    responses((status = 200, description = "Settings for connecting another mail app", body = DataResponse<ClientConnectionResponse>))
+)]
+pub async fn get_client_connection(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Response, ApiError> {
+    let smtp_security = if state.config.starttls_enabled() {
+        "starttls"
+    } else {
+        "none"
+    };
+    Ok(Json(DataResponse {
+        data: ClientConnectionResponse {
+            smtp_host: state.config.hostname.clone(),
+            smtp_port: submission_port(&state.config.submission_listen),
+            smtp_security: smtp_security.to_string(),
+            username: principal.scope().map(|scope| scope.address.clone()),
+            imap_supported: false,
+        },
+    })
+    .into_response())
+}
+
 // ---------------------------------------------------------------------------
 // Contacts
 // ---------------------------------------------------------------------------
@@ -3536,19 +3680,37 @@ pub async fn update_mailbox(
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "Forbidden",
-                "A session may only change its own signature and display name",
+                "A session may only change its own signature, display name and forwarding address",
             )
             .code("forbidden"));
         }
     }
+    // A forwarding address is stored normalised; an empty one turns it off.
+    let forward_to = match body.forward_to {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Some(None)
+            } else {
+                let parsed = address::parse(trimmed)
+                    .ok_or_else(|| bad_request("forward_to must be an email address"))?;
+                Some(Some(parsed.normalized()))
+            }
+        }
+    };
     let updated = repo::update_mailbox(
         &state.db,
         &address,
-        body.password.as_deref(),
-        body.signature,
-        body.display_name,
-        body.quota_bytes,
-        body.active,
+        repo::MailboxUpdate {
+            password: body.password,
+            signature: body.signature,
+            display_name: body.display_name,
+            forward_to,
+            quota_bytes: body.quota_bytes,
+            active: body.active,
+        },
     )
     .await
     .map_err(db_error)?
@@ -3884,6 +4046,46 @@ pub async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_renderable_types_preview_inline() {
+        assert!(inline_previewable("application/pdf"));
+        assert!(inline_previewable("image/png"));
+        assert!(inline_previewable("image/jpeg; charset=binary"));
+        assert!(inline_previewable("video/mp4"));
+        assert!(inline_previewable("audio/mpeg"));
+        assert!(inline_previewable("text/plain"));
+        // Script-bearing types stay downloads even on a preview request.
+        assert!(!inline_previewable("text/html"));
+        assert!(!inline_previewable("image/svg+xml"));
+        assert!(!inline_previewable("application/xml"));
+        assert!(!inline_previewable("application/octet-stream"));
+    }
+
+    #[test]
+    fn a_disposition_quotes_the_name_and_encodes_non_ascii() {
+        assert_eq!(
+            content_disposition("attachment", "note.txt"),
+            "attachment; filename=\"note.txt\""
+        );
+        // A quote in the name cannot break out of the quoted string.
+        assert_eq!(
+            content_disposition("inline", "a\"b.txt"),
+            "inline; filename=\"a\\\"b.txt\""
+        );
+        assert_eq!(
+            content_disposition("inline", "ring\u{f8}.pdf"),
+            "inline; filename=\"ring_.pdf\"; filename*=UTF-8''ring%C3%B8.pdf"
+        );
+    }
+
+    #[test]
+    fn the_submission_port_falls_back_when_unparsable() {
+        assert_eq!(submission_port("0.0.0.0:2587"), 2587);
+        assert_eq!(submission_port("0.0.0.0:587"), 587);
+        assert_eq!(submission_port("[::]:587"), 587);
+        assert_eq!(submission_port("nonsense"), 587);
+    }
 
     #[test]
     fn a_from_header_may_carry_a_display_name() {

@@ -42,3 +42,12 @@ export type MailboxStorage = {
 	usedBytes: number;
 	quotaBytes: number;
 };
+
+/** How another mail app connects to send as this mailbox, from GET /api/settings/clients. */
+export type ClientConnection = {
+	smtpHost: string;
+	smtpPort: number;
+	smtpSecurity: "starttls" | "none";
+	username: string | null;
+	imapSupported: boolean;
+};

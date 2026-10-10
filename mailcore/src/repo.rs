@@ -74,32 +74,43 @@ pub async fn list_mailboxes_in_domain(
 }
 
 /// Applies the operator-supplied mailbox fields; absent fields are left alone.
+/// The mutable fields of a mailbox an update may set. A top-level None leaves a
+/// field alone; the nested Option sets or clears a nullable one.
+#[derive(Debug, Default)]
+pub struct MailboxUpdate {
+    pub password: Option<String>,
+    pub signature: Option<Option<String>>,
+    pub display_name: Option<Option<String>>,
+    pub forward_to: Option<Option<String>>,
+    pub quota_bytes: Option<i64>,
+    pub active: Option<bool>,
+}
+
 pub async fn update_mailbox(
     db: &DatabaseConnection,
     address: &str,
-    password: Option<&str>,
-    signature: Option<Option<String>>,
-    display_name: Option<Option<String>>,
-    quota_bytes: Option<i64>,
-    active: Option<bool>,
+    update: MailboxUpdate,
 ) -> Result<Option<mailbox::Model>> {
     let Some(existing) = find_mailbox(db, address).await? else {
         return Ok(None);
     };
     let mut model: mailbox::ActiveModel = existing.into();
-    if let Some(password) = password {
+    if let Some(password) = update.password.as_deref() {
         model.password_hash = Set(crate::auth::hash_password(password)?);
     }
-    if let Some(signature) = signature {
+    if let Some(signature) = update.signature {
         model.signature = Set(signature);
     }
-    if let Some(display_name) = display_name {
+    if let Some(display_name) = update.display_name {
         model.display_name = Set(display_name);
     }
-    if let Some(quota_bytes) = quota_bytes {
+    if let Some(forward_to) = update.forward_to {
+        model.forward_to = Set(forward_to);
+    }
+    if let Some(quota_bytes) = update.quota_bytes {
         model.quota_bytes = Set(quota_bytes);
     }
-    if let Some(active) = active {
+    if let Some(active) = update.active {
         model.active = Set(active);
     }
     model.updated_at = Set(Utc::now());
@@ -215,6 +226,7 @@ pub async fn create_mailbox(
         password_hash: Set(crate::auth::hash_password(password)?),
         signature: Set(None),
         display_name: Set(None),
+        forward_to: Set(None),
         quota_bytes: Set(0),
         active: Set(true),
         created_at: Set(now),

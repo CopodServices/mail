@@ -1,5 +1,9 @@
 import { apiFetch } from "@/lib/api/client";
-import type { BulkMessageAction, MailboxStorage } from "./types";
+import type {
+	BulkMessageAction,
+	ClientConnection,
+	MailboxStorage,
+} from "./types";
 
 /**
  * Typed helpers for the mail API's write endpoints, built on the transport in
@@ -146,6 +150,57 @@ export async function fetchMailboxStorage(): Promise<MailboxStorage[]> {
 		usedBytes: mailbox.used_bytes ?? 0,
 		quotaBytes: mailbox.quota_bytes ?? 0,
 	}));
+}
+
+/**
+ * The submission settings another mail app connects with. The host, port and
+ * TLS mode come from the server's own configuration, so a self-hosted instance
+ * never shows a hard-coded port.
+ */
+export async function fetchClientConnection(): Promise<ClientConnection> {
+	const response = await apiFetch("/api/settings/clients");
+	if (!response.ok) throw new Error("Unable to load the connection settings");
+	const body = (await response.json()) as {
+		data?: {
+			smtp_host?: string;
+			smtp_port?: number;
+			smtp_security?: string;
+			username?: string | null;
+			imap_supported?: boolean;
+		};
+	};
+	if (!body.data?.smtp_host)
+		throw new Error("Unable to load the connection settings");
+	return {
+		smtpHost: body.data.smtp_host,
+		smtpPort: body.data.smtp_port ?? 587,
+		smtpSecurity: body.data.smtp_security === "starttls" ? "starttls" : "none",
+		username: body.data.username ?? null,
+		imapSupported: body.data.imap_supported ?? false,
+	};
+}
+
+/**
+ * Turns the mailbox's auto-forward address on or off. Resolves with the address
+ * the API stored, which is null when forwarding was turned off.
+ */
+export async function updateMailboxForwarding(
+	address: string,
+	forwardTo: string | null,
+): Promise<string | null> {
+	const response = await apiFetch(
+		"/api/mailboxes/" + encodeURIComponent(address),
+		{
+			method: "PATCH",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ forward_to: forwardTo }),
+		},
+	);
+	if (!response.ok) throw new Error("Unable to save the forwarding address");
+	const body = (await response.json()) as {
+		data?: { forward_to?: string | null };
+	};
+	return body.data?.forward_to ?? null;
 }
 
 type ApiDraftAttachment = {

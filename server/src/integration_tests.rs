@@ -308,9 +308,16 @@ async fn enforces_the_mailbox_storage_quota() {
     let address = format!("full@{domain}");
     let mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
     // A deliberately tiny quota so a normal message overshoots it.
-    repo::update_mailbox(&db, &address, None, None, None, Some(400), None)
-        .await
-        .unwrap();
+    repo::update_mailbox(
+        &db,
+        &address,
+        repo::MailboxUpdate {
+            quota_bytes: Some(400),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
 
     let state = AppState {
         db: db.clone(),
@@ -894,6 +901,265 @@ async fn a_queued_copy_reports_its_send_state() {
     for id in ids {
         repo::delete_message(&db, id).await.unwrap();
     }
+    let _ = repo::delete_mailbox(&db, &mailbox.address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
+/// Inbound mail for a mailbox with an auto-forward address is queued once to
+/// that address, and a copy that already carries the forward marker is not
+/// forwarded again. Needs the compose stack:
+///
+///     MAIL_TEST_INTEGRATION=1 cargo test --all auto_forwards
+#[tokio::test]
+async fn auto_forwards_an_arriving_message_once() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    let config = Arc::new(test_config());
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let store = MailStore::new(&config.s3).expect("object store");
+
+    let domain = format!("forward-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let address = format!("inbox@{domain}");
+    let mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
+    repo::update_mailbox(
+        &db,
+        &address,
+        repo::MailboxUpdate {
+            forward_to: Some(Some("dest@remote.test".to_string())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .expect("the mailbox exists");
+
+    let state = AppState {
+        db: db.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        authenticator: None,
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(smtp::serve(listener, state.clone(), Mode::Inbound));
+
+    deliver_inbound(addr, &address, &["Subject: hello", "", "body line"]).await;
+    // A message that already came through the forward is delivered but not sent
+    // on again, so a loop between two mailboxes cannot run forever.
+    let marker = format!("X-Copod-Auto-Forwarded: {address}");
+    deliver_inbound(
+        addr,
+        &address,
+        &[&marker, "Subject: looped", "", "body line"],
+    )
+    .await;
+
+    let jobs = outbound_job::Entity::find()
+        .filter(outbound_job::Column::EnvelopeFrom.eq(&address))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 1, "only the unmarked arrival is forwarded");
+    let job = &jobs[0];
+    assert_eq!(job.envelope_from, address);
+    let recipients: Vec<String> = serde_json::from_value(job.recipients.clone()).unwrap();
+    assert_eq!(recipients, vec!["dest@remote.test".to_string()]);
+
+    let payload = store
+        .get(&job.storage_key)
+        .await
+        .expect("forwarded payload");
+    let text = String::from_utf8_lossy(&payload);
+    assert!(
+        text.contains("X-Copod-Auto-Forwarded:"),
+        "the copy is marked so it cannot loop"
+    );
+    assert!(text.contains("body line"));
+
+    // Clean up the fixtures, including the stored arrivals and the forwarded copy.
+    let arrivals = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox.id))
+        .all(&db)
+        .await
+        .unwrap();
+    for row in &arrivals {
+        let _ = store.delete(&row.storage_key).await;
+    }
+    let _ = store.delete(&job.storage_key).await;
+    let _ = outbound_job::Entity::delete_by_id(job.id).exec(&db).await;
+    for row in arrivals {
+        let _ = repo::delete_message(&db, row.id).await;
+    }
+    let _ = repo::delete_mailbox(&db, &address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
+/// Delivers one message to `recipient` over a fresh inbound session.
+async fn deliver_inbound(addr: std::net::SocketAddr, recipient: &str, lines: &[&str]) {
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+    assert_eq!(read_reply(&mut reader).await, 220);
+    command(&mut write_half, "EHLO client.example.test").await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, "MAIL FROM:<sender@remote.test>").await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, &format!("RCPT TO:<{recipient}>")).await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, "DATA").await;
+    assert_eq!(read_reply(&mut reader).await, 354);
+    let mut body = lines.to_vec();
+    body.push(".");
+    write_half.write_all(&wire(&body)).await.unwrap();
+    write_half.flush().await.unwrap();
+    assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, "QUIT").await;
+    assert_eq!(read_reply(&mut reader).await, 221);
+}
+
+/// The attachment endpoint serves a renderable part inline on a preview request
+/// and nothing else: HTML stays a download so a preview URL cannot run script.
+/// Needs the compose stack and MAIL_TEST_INTEGRATION=1.
+#[tokio::test]
+async fn preview_serves_only_renderable_attachments_inline() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let config = Arc::new(test_config());
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let store = MailStore::new(&config.s3).expect("object store");
+
+    let state = AppState {
+        db: db.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        authenticator: None,
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+
+    let domain = format!("preview-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let mailbox = repo::create_mailbox(&db, &format!("inbox@{domain}"), "secret")
+        .await
+        .unwrap();
+
+    let raw = concat!(
+        "From: sender@remote.test\r\n",
+        "To: inbox\r\n",
+        "Subject: preview\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=xyz\r\n",
+        "\r\n",
+        "--xyz\r\n",
+        "Content-Type: text/html; name=page.html\r\n",
+        "Content-Disposition: attachment; filename=page.html\r\n",
+        "\r\n",
+        "<script>alert(1)</script>\r\n",
+        "--xyz\r\n",
+        "Content-Type: application/pdf; name=doc.pdf\r\n",
+        "Content-Disposition: attachment; filename=doc.pdf\r\n",
+        "\r\n",
+        "%PDF-1.4\r\n",
+        "--xyz--\r\n",
+    )
+    .as_bytes()
+    .to_vec();
+
+    let id = Uuid::now_v7();
+    let key = format!("fixtures/preview-{id}.eml");
+    store.put(&key, raw.clone()).await.unwrap();
+    repo::insert_message(
+        &db,
+        message::ActiveModel {
+            id: Set(id),
+            mailbox_id: Set(Some(mailbox.id)),
+            direction: Set(message::Direction::Inbound),
+            status: Set(message::Status::Stored),
+            envelope_from: Set("sender@remote.test".to_string()),
+            envelope_to: Set(mailbox.address.clone()),
+            message_id: Set(Some(format!("<{id}@remote.test>"))),
+            subject: Set(Some("preview".to_string())),
+            size_bytes: Set(raw.len() as i64),
+            storage_key: Set(key.clone()),
+            received_at: Set(Utc::now()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let fetch = |uri: String| {
+        let app = crate::api::router(state.clone());
+        async move {
+            let request = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            let header = |name: &str| {
+                response
+                    .headers()
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            (
+                response.status(),
+                header("content-disposition"),
+                header("content-type"),
+            )
+        }
+    };
+
+    // The PDF previews in place; the same part downloads without the query.
+    let (status, disposition, content_type) =
+        fetch(format!("/api/messages/{id}/attachments/1?preview=1")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(disposition.starts_with("inline"), "{disposition}");
+    assert_eq!(content_type, "application/pdf");
+
+    let (_, disposition, _) = fetch(format!("/api/messages/{id}/attachments/1")).await;
+    assert!(disposition.starts_with("attachment"), "{disposition}");
+
+    // HTML carries script, so even a preview request downloads it.
+    let (_, disposition, content_type) =
+        fetch(format!("/api/messages/{id}/attachments/0?preview=1")).await;
+    assert!(disposition.starts_with("attachment"), "{disposition}");
+    assert!(
+        content_type.starts_with("text/html"),
+        "index 0 is the HTML part: {content_type}"
+    );
+
+    // Clean up the fixtures.
+    let _ = store.delete(&key).await;
+    let _ = repo::delete_message(&db, id).await;
     let _ = repo::delete_mailbox(&db, &mailbox.address).await;
     let _ = entity::domain::Entity::delete_many()
         .filter(entity::domain::Column::Name.eq(domain))

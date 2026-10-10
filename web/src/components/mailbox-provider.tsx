@@ -20,6 +20,8 @@ export type MailboxOption = {
 	hostname: string;
 	displayName: string | null;
 	signature?: string | null;
+	/** Address every arriving message is copied to; null when forwarding is off. */
+	forwardTo?: string | null;
 	autoReplyEnabled?: boolean;
 	autoReplySubject?: string;
 	autoReplyBody?: string;

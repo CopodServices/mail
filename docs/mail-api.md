@@ -45,7 +45,7 @@ Tenant lifecycle, behind the API key:
 | DELETE | /api/domains/{name} | Remove a domain and its mailboxes |
 | GET | /api/mailboxes | List mailboxes with `used_bytes` and `quota_bytes` (?domain=<name> filters) |
 | POST | /api/mailboxes | Create a mailbox ({address, password}) |
-| PATCH | /api/mailboxes/{address} | {signature, display_name, password, quota_bytes, active} |
+| PATCH | /api/mailboxes/{address} | {signature, display_name, forward_to, password, quota_bytes, active} |
 | DELETE | /api/mailboxes/{address} | Delete a mailbox |
 
 Every mailbox reports its storage as `used_bytes` (the sum of its stored message
@@ -70,7 +70,7 @@ The client's whole reading path is served by the API today:
 | GET | /api/messages/counts | Folder and mailbox totals plus unread counts, including custom folders |
 | GET | /api/messages/{id} | Message with body (text/html) and attachment list |
 | GET | /api/messages/{id}/raw | Raw RFC5322 message |
-| GET | /api/messages/{id}/attachments/{index} | Attachment bytes by position |
+| GET | /api/messages/{id}/attachments/{index} | Attachment bytes by position; ?preview=1 serves a renderable part inline |
 | POST | /api/messages/{id}/read | Set read state |
 | POST | /api/messages/{id}/star | Set starred state |
 | POST / DELETE | /api/messages/{id}/snooze | Snooze until a time, or return it now |
@@ -83,13 +83,14 @@ The client's whole reading path is served by the API today:
 | GET | /api/folders | System and custom folders |
 | POST | /api/folders | Create a custom folder |
 | GET | /api/mailboxes | Mailboxes (a session sees only its own) |
-| PATCH | /api/mailboxes/{address} | Set the mailbox signature or display name (a session may set only its own) |
+| PATCH | /api/mailboxes/{address} | Set the mailbox signature, display name or auto-forward address (a session may set only its own) |
 | GET | /api/attachment-policy | Attachment limits for the composer |
 | POST | /api/drafts, /api/drafts/{id} | Drafts: create, read, update, discard (forward_of_message_id copies its attachments) |
 | POST | /api/drafts/{id}/attachments, DELETE /api/drafts/{id}/attachments/{index} | Draft attachments |
 | POST | /api/send | Compose and deliver, including cc/bcc and a draft id whose attachments ride along |
 | GET/POST | /api/templates, GET/DELETE /api/templates/{id} | Composer templates |
 | GET/PATCH | /api/settings/shortcuts, /api/settings/recipient-addresses | Client preferences |
+| GET | /api/settings/clients | Submission host, port, TLS mode and username for another mail app |
 | GET/PATCH | /api/contacts | Read or rename a contact |
 | POST | /api/contacts/block | Block a sender |
 | GET/POST/DELETE | /api/contacts/avatar | Contact picture, full or preview |
@@ -110,6 +111,19 @@ badge always matches the rows it opens.
 
 Client preferences are one settings row per mailbox (keyed by the mailbox
 address), and templates are a small table the composer lists and fills from.
+
+Attachment bytes are served by position within the parsed message. With
+?preview=1 a part the browser can render in place (an image, a PDF, audio,
+video, plain text, CSV or JSON) is served inline; every other type, including
+HTML, SVG and XML, stays a download so a preview URL can never run script in the
+mail origin. Without the query the part always downloads.
+
+A mailbox may carry one auto-forward address (forward_to). A copy of each
+message delivered to that mailbox is queued to the address with the mailbox as
+the envelope sender, so the relay's sending-domain check passes. The forwarded
+copy is marked with an X-Copod-Auto-Forwarded header: a forward that loops back
+is delivered but never forwarded again, and forwarding to the mailbox's own
+address is ignored.
 
 A draft is an ordinary message row whose reader flag puts it in the drafts
 folder, with the composed message in object storage, so the drafts list, counts

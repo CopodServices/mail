@@ -15,6 +15,8 @@ pub struct Model {
     pub signature: Option<String>,
     /// The name recipients see beside the address in the From header.
     pub display_name: Option<String>,
+    /// Address every arriving message is copied to, when set.
+    pub forward_to: Option<String>,
     pub quota_bytes: i64,
     pub active: bool,
     pub created_at: chrono::DateTime<Utc>,

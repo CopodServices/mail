@@ -3,9 +3,13 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use entity::{mailbox, message, outbound_job};
 use mailcore::policy::AuthOutcome;
-use mailcore::{meta, repo, store};
+use mailcore::{address, meta, repo, store};
 use sea_orm::Set;
 use uuid::Uuid;
+
+/// Header this service writes onto a forwarded copy so a forward that loops
+/// back is delivered but never forwarded again.
+const FORWARD_MARKER: &str = "X-Copod-Auto-Forwarded";
 
 /// Stores a message in a local mailbox and indexes it in PostgreSQL.
 ///
@@ -101,7 +105,84 @@ pub async fn store_local(
         );
     }
 
+    // Auto-forward: a copy of an arriving message goes to the mailbox's
+    // configured address. Losing the forward must not lose the delivery, so a
+    // failure is logged and the stored copy is left alone.
+    if inbound && let Err(err) = forward_inbound(state, mailbox, raw).await {
+        tracing::warn!(error = %err, mailbox = %mailbox.address, "failed to queue the auto-forward");
+    }
+
     Ok(inserted.id)
+}
+
+/// Queues one copy of an arriving message to the mailbox's auto-forward address.
+///
+/// The mailbox is the envelope sender, because the relay only accepts mail from
+/// the domains it is configured to send for, and the stored message keeps its
+/// original From header. Returns the queued job id, or None when there is
+/// nothing to forward.
+pub async fn forward_inbound(
+    state: &AppState,
+    mailbox: &mailbox::Model,
+    raw: &[u8],
+) -> Result<Option<Uuid>> {
+    let Some(target) = mailbox
+        .forward_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(parsed) = address::parse(target) else {
+        bail!(
+            "mailbox {} has an invalid auto-forward address",
+            mailbox.address
+        );
+    };
+    let target = parsed.normalized();
+    // Forwarding to itself, or a copy that already came through here, would
+    // loop; deliver it and stop.
+    if target == mailbox.address || already_forwarded(raw) {
+        return Ok(None);
+    }
+
+    let marked = mark_forwarded(raw, &mailbox.address);
+    let job = enqueue_remote(
+        state,
+        Some(mailbox.id),
+        &mailbox.address,
+        std::slice::from_ref(&target),
+        &marked,
+        None,
+    )
+    .await?;
+    Ok(Some(job))
+}
+
+/// True when the stored message already carries the auto-forward marker. Only
+/// the header block is searched, so the string in a body cannot stop a forward.
+fn already_forwarded(raw: &[u8]) -> bool {
+    for line in String::from_utf8_lossy(raw).lines() {
+        if line.trim().is_empty() {
+            return false;
+        }
+        if line
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("x-copod-auto-forwarded:")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The forwarded bytes: the original message with the marker header on top.
+fn mark_forwarded(raw: &[u8], from: &str) -> Vec<u8> {
+    let mut marked = format!("{FORWARD_MARKER}: {from}\r\n").into_bytes();
+    marked.extend_from_slice(raw);
+    marked
 }
 
 /// Stores an outgoing copy and queues it for relay delivery.
@@ -191,7 +272,7 @@ fn exceeds_quota(used: i64, incoming: i64, quota: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::exceeds_quota;
+    use super::{already_forwarded, exceeds_quota, mark_forwarded};
 
     #[test]
     fn a_zero_quota_is_unlimited() {
@@ -202,5 +283,19 @@ mod tests {
     fn a_message_that_fits_is_allowed_and_one_byte_over_is_not() {
         assert!(!exceeds_quota(100, 50, 150));
         assert!(exceeds_quota(100, 51, 150));
+    }
+
+    #[test]
+    fn a_marked_message_is_recognised_even_past_a_folded_header() {
+        let raw = b"From: a@example.test\r\nSubject: hi\r\n\r\nbody\r\n";
+        assert!(!already_forwarded(raw));
+        let marked = mark_forwarded(raw, "inbox@example.test");
+        assert!(already_forwarded(&marked));
+    }
+
+    #[test]
+    fn a_marker_in_the_body_does_not_count() {
+        let raw = b"From: a@example.test\r\n\r\nX-Copod-Auto-Forwarded: no\r\n";
+        assert!(!already_forwarded(raw));
     }
 }

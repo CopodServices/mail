@@ -8,6 +8,14 @@ export const settingsNavSections: SettingsNavSection[] = [
 				href: "/settings/inbox",
 				labelKey: "settings.nav.inbox",
 			},
+			{
+				href: "/settings/forwarding",
+				labelKey: "settings.nav.forwarding",
+			},
+			{
+				href: "/settings/clients",
+				labelKey: "settings.nav.clients",
+			},
 		],
 	},
 ];
