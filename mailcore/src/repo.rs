@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use entity::{domain, mailbox, message, outbound_job};
-use sea_orm::ExprTrait;
-use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::{Alias, Expr};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, FromQueryResult,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub async fn find_domain(db: &DatabaseConnection, name: &str) -> Result<Option<domain::Model>> {
@@ -143,6 +143,54 @@ pub async fn list_mailboxes(db: &DatabaseConnection) -> Result<Vec<mailbox::Mode
         .order_by_asc(mailbox::Column::Address)
         .all(db)
         .await?)
+}
+
+/// Bytes stored for one mailbox: the sum of its messages' sizes.
+pub async fn mailbox_usage_bytes(db: &DatabaseConnection, mailbox_id: Uuid) -> Result<i64> {
+    #[derive(FromQueryResult)]
+    struct Usage {
+        used_bytes: Option<i64>,
+    }
+
+    // Postgres returns SUM(bigint) as numeric, so cast to bigint for an i64 read.
+    let usage: Option<Usage> = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox_id))
+        .select_only()
+        .column_as(sum_size_bytes(), "used_bytes")
+        .into_model::<Usage>()
+        .one(db)
+        .await?;
+    Ok(usage.and_then(|usage| usage.used_bytes).unwrap_or(0))
+}
+
+/// Bytes stored for every mailbox that holds at least one message.
+pub async fn mailbox_usage_totals(db: &DatabaseConnection) -> Result<HashMap<Uuid, i64>> {
+    #[derive(FromQueryResult)]
+    struct Usage {
+        mailbox_id: Uuid,
+        used_bytes: Option<i64>,
+    }
+
+    let rows: Vec<Usage> = message::Entity::find()
+        .filter(message::Column::MailboxId.is_not_null())
+        .select_only()
+        .column(message::Column::MailboxId)
+        .column_as(sum_size_bytes(), "used_bytes")
+        .group_by(message::Column::MailboxId)
+        .into_model::<Usage>()
+        .all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.mailbox_id, row.used_bytes.unwrap_or(0)))
+        .collect())
+}
+
+/// `SUM(size_bytes)::bigint`, the stored size of a group of messages.
+fn sum_size_bytes() -> sea_orm::sea_query::SimpleExpr {
+    Expr::col(message::Column::SizeBytes)
+        .sum()
+        .cast_as(Alias::new("bigint"))
 }
 
 pub async fn create_mailbox(
@@ -315,4 +363,25 @@ pub async fn count_pending(db: &DatabaseConnection) -> Result<u64> {
         .count(db)
         .await?;
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    /// Postgres returns `SUM(bigint)` as `numeric`, so the meter query must cast
+    /// the total to bigint for an `i64` read.
+    #[test]
+    fn usage_query_casts_the_sum_to_bigint() {
+        let sql = message::Entity::find()
+            .select_only()
+            .column_as(sum_size_bytes(), "used_bytes")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("CAST(SUM(") && sql.contains("bigint"),
+            "unexpected SQL: {sql}"
+        );
+    }
 }
