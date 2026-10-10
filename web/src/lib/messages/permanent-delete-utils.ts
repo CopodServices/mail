@@ -1,4 +1,4 @@
-import type { PermanentDeleteFolder } from "@/lib/mail-api/types";
+import type { PermanentDeleteFolder } from "@/lib/api/types";
 import { defaultTranslator, type Translator } from "../i18n/utils";
 
 const folderLabelKeys = {

@@ -1,8 +1,9 @@
 # cPOD Mail web client
 
-A mail web client (a Roundcube-style reader) for the cPOD Mail API: sign-in-free
-for now, inbox and threads, compose and send, sent, drafts, spam, trash, starred,
-snoozed, archived, custom folders, and search.
+A mail web client (a Roundcube-style reader) for the cPOD Mail API: sign in with
+a mailbox address and password, then inbox and threads, compose and send, sent,
+drafts, spam, trash, starred, snoozed, archived, custom folders, and search.
+Many tenants' mailboxes use the same deployment; each session sees only its own.
 
 It is a static, client-rendered bundle (no server rendering, no Node runtime in
 production). Every page loads its data in the browser from the mail API.
@@ -26,11 +27,14 @@ restart.
 
 ## API
 
-The client calls the mail API directly under /api/*. It is a plain web client:
-it sends no credentials of its own and never holds an API key, so anything that
-has to stay secret belongs to the service fronting the API. Authentication will
-move to external SSO later. See ../docs/mail-api.md for the endpoints the
-client uses.
+The client calls the mail API directly under /api/*. Signing in posts the mailbox
+address and password to POST /api/session; the API answers with an httpOnly
+session cookie and a readable CSRF cookie, so the bundle never holds a long-lived
+credential. Every request goes through src/lib/api/client.ts, which sends
+credentials: "same-origin", adds the CSRF header to writes, and returns to /login
+on a 401. The dashboard is wrapped in a client-side session guard, because a
+static export has no server middleware. See ../docs/mail-api.md for the
+endpoints the client uses.
 
 The API base URL is a run-time decision, not a build-time one. The bundle is
 built with NEXT_PUBLIC_MAIL_API_URL empty, so the browser only ever calls this
@@ -41,8 +45,8 @@ the client needs no CORS setup.
 
 ## Routes
 
-Inbox, starred, snoozed, sent, scheduled, drafts, archived, spam, trash, custom
-folders, compose, and settings (appearance, reading layout, threading,
+Login, inbox, starred, snoozed, sent, scheduled, drafts, archived, spam, trash,
+custom folders, compose, and settings (appearance, reading layout, threading,
 shortcuts and notifications — all stored locally).
 
 Message selection travels in the query string (/inbox?message=<id>,
@@ -50,8 +54,8 @@ Message selection travels in the query string (/inbox?message=<id>,
 
 ## Tests
 
-bun run test runs the client's own API helpers and adapters (tests/), but the
-contract suite needs a live API:
+bun run test runs the client's own session helpers (tests/session.test.ts) plus
+its API helpers and adapters; the contract suite needs a live API:
 
     MAIL_API_URL=http://127.0.0.1:8080 bun test
 
@@ -73,3 +77,10 @@ The UI is a reimplementation of the Mailflare mail client by Hieu Nguyen
 (https://github.com/hieunc229/mailflare, AGPL-3.0). The upstream project is
 credited in ../NOTICE and the repository README. This project is licensed
 AGPL-3.0; the sidebar footer links to the source.
+
+The message catalogs under public/locales are ported from the upstream project:
+32 non-English locales, registered in src/lib/i18n/locales.ts and picked in
+settings. English ships in the bundle; the others load on demand. The strings
+this fork adds on top of upstream — the sign-in screen, scheduling and mailbox
+signature — are translated into every catalog as well, so no locale falls back to
+English. tests/i18n.test.ts keeps the catalogs key-complete and placeholder-safe.

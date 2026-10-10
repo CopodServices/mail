@@ -3,7 +3,7 @@
 import { Folder } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useSelectedMailbox } from "@/components/mailbox-provider";
-import { fetchFolders } from "@/lib/mail-api/client";
+import { fetchFolders } from "@/lib/api/endpoints";
 import { folderListHref } from "@/lib/mail-routes";
 import type { CustomFolderSummary } from "./custom-folder-config-types";
 import type { MessageFolderConfig } from "./types";

@@ -1,10 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ThreadMessage } from "@/hooks/types";
+import { type ApiThreadMessage, adaptThreadMessage } from "@/lib/api/adapters";
 import { apiFetch } from "@/lib/api/client";
-import {
-	type ApiThreadMessage,
-	adaptThreadMessage,
-} from "@/lib/mail-api/adapters";
 import type { UseMessageThreadResult } from "./conversation-thread-types";
 
 /** Loads every message in the conversation of `messageId`; refetches when mail changes. */

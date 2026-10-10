@@ -14,7 +14,7 @@ import { useSelectedMailbox } from "@/components/mailbox-provider";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { apiFetch } from "@/lib/api/client";
-import type { MessageNavigationEntry } from "@/lib/mail-api/types";
+import type { MessageNavigationEntry } from "@/lib/api/types";
 import { messageHref } from "@/lib/mail-routes";
 import type {
 	MessageDetailNavigationContextValue,

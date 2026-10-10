@@ -1,5 +1,5 @@
+import { adaptCounts, adaptMessageList } from "@/lib/api/adapters";
 import { apiFetch } from "@/lib/api/client";
-import { adaptCounts, adaptMessageList } from "@/lib/mail-api/adapters";
 import { setCachedMessageRead } from "@/lib/messages/detail-cache";
 import { parseSearchQuery } from "@/lib/search/query-utils";
 import type {

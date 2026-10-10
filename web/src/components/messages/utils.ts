@@ -1,16 +1,16 @@
 import type { MailboxOption } from "@/components/mailbox-provider";
 import type { Message } from "@/hooks/types";
 import { markMessagesReadInCaches } from "@/hooks/utils";
+import { bulkMessageAction } from "@/lib/api/endpoints";
+import type {
+	EmptyFolderResponse,
+	PermanentDeleteFolder,
+} from "@/lib/api/types";
 import {
 	getEmailDisplayName,
 	splitEmailAddressList,
 } from "@/lib/email/address";
 import { defaultTranslator, type Translator } from "@/lib/i18n/utils";
-import { bulkMessageAction } from "@/lib/mail-api/client";
-import type {
-	EmptyFolderResponse,
-	PermanentDeleteFolder,
-} from "@/lib/mail-api/types";
 import {
 	formatUserDate,
 	getUserTimeZone,

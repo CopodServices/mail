@@ -23,7 +23,7 @@ import { useHotkeys, useShortcuts } from "@/components/shortcuts";
 import { useIsMobile } from "@/components/sidebar-mobile-utils";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
-import type { BulkMessageAction } from "@/lib/mail-api/types";
+import type { BulkMessageAction } from "@/lib/api/types";
 import {
 	getPermanentDeleteConfirmText,
 	supportsPermanentDelete,

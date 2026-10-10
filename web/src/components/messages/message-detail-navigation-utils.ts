@@ -1,4 +1,4 @@
-import type { MessageNavigationEntry } from "@/lib/mail-api/types";
+import type { MessageNavigationEntry } from "@/lib/api/types";
 import type { MessageDetailNavigationState } from "./message-detail-navigation-types";
 
 const openedUnreadKey = "copod-navigation-opened-unread";

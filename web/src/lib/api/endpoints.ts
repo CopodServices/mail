@@ -2,7 +2,8 @@ import { apiFetch } from "@/lib/api/client";
 import type { BulkMessageAction } from "./types";
 
 /**
- * Typed helpers for the mail API's write endpoints.
+ * Typed helpers for the mail API's write endpoints, built on the transport in
+ * ./client.ts (cookies, CSRF, 401 handling) — the only place a request is sent.
  *
  * The API is the source of truth: requests use its vocabulary (snake_case
  * bodies, data/meta envelopes) and these helpers unwrap the envelope so the UI

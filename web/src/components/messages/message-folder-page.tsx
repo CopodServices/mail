@@ -24,7 +24,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import type { Message } from "@/hooks/types";
 import { useMessageCounts } from "@/hooks/use-message-counts";
 import { useMessages } from "@/hooks/use-messages";
-import type { BulkMessageAction } from "@/lib/mail-api/types";
+import type { BulkMessageAction } from "@/lib/api/types";
 import { messageHref } from "@/lib/mail-routes";
 import { setMessageDragData } from "@/lib/messages/drag-utils";
 import {

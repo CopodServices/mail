@@ -3,7 +3,7 @@
 import { CheckSquare2 } from "lucide-react";
 import { useState } from "react";
 import { useLanguage } from "@/components/language-provider";
-import type { BulkMessageAction } from "@/lib/mail-api/types";
+import type { BulkMessageAction } from "@/lib/api/types";
 import { BulkMessageToolbar } from "./bulk-message-toolbar";
 import type { BulkMessageSelectionPaneProps } from "./types";
 import { runBulkMessageAction } from "./utils";

@@ -1,4 +1,4 @@
-import { loadDraft } from "@/lib/mail-api/client";
+import { loadDraft } from "@/lib/api/endpoints";
 import type { ComposeDraft } from "./types";
 
 export async function fetchDraft(draftId: string): Promise<ComposeDraft> {

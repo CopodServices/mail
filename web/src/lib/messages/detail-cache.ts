@@ -1,6 +1,6 @@
 import type { Message } from "@/hooks/types";
+import { adaptMessageDetail } from "@/lib/api/adapters";
 import { apiFetch } from "@/lib/api/client";
-import { adaptMessageDetail } from "@/lib/mail-api/adapters";
 import type { CachedMessageDetail } from "./detail-cache-types";
 
 const detailCache = new Map<string, CachedMessageDetail>();

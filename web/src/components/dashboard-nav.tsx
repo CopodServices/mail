@@ -30,6 +30,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useMessageCounts } from "@/hooks/use-message-counts";
+import {
+	createFolder as createMailboxFolder,
+	fetchFolders,
+} from "@/lib/api/endpoints";
 import { folderColorKeys } from "@/lib/folders/color-keys";
 import {
 	DEFAULT_FOLDER_COLOR,
@@ -37,10 +41,6 @@ import {
 } from "@/lib/folders/colors";
 import type { FolderColor } from "@/lib/folders/types";
 import type { TranslationKey } from "@/lib/i18n/types";
-import {
-	createFolder as createMailboxFolder,
-	fetchFolders,
-} from "@/lib/mail-api/client";
 import { folderListHref } from "@/lib/mail-routes";
 import { NavItem } from "./components-nav";
 import type { NavLink } from "./components-nav-types";

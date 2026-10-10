@@ -28,3 +28,10 @@ export type MessageNavigationEntry = {
 	id: string;
 	unread: boolean;
 };
+
+/** The mailbox behind a signed-in webmail session. */
+export type SessionMailbox = {
+	mailbox_id: string;
+	address: string;
+	domain: string;
+};

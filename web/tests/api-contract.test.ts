@@ -12,8 +12,8 @@ const base = process.env.MAIL_API_URL?.trim().replace(/\/+$/, "");
 // The client reads this when its API base module is first imported.
 process.env.NEXT_PUBLIC_MAIL_API_URL = base ?? "";
 
-type Client = typeof import("@/lib/mail-api/client");
-type Adapt = typeof import("@/lib/mail-api/adapters");
+type Client = typeof import("@/lib/api/endpoints");
+type Adapt = typeof import("@/lib/api/adapters");
 
 async function readJson(path: string) {
 	const response = await fetch((base ?? "") + path);
@@ -28,8 +28,8 @@ describe.skipIf(!base)("the web client against the live API", () => {
 	let mailboxAddress: string;
 
 	beforeAll(async () => {
-		api = await import("@/lib/mail-api/client");
-		adapters = await import("@/lib/mail-api/adapters");
+		api = await import("@/lib/api/endpoints");
+		adapters = await import("@/lib/api/adapters");
 		const mailboxes = await readJson("/api/mailboxes");
 		mailboxId = mailboxes.data[0].id;
 		mailboxAddress = mailboxes.data[0].address;

@@ -1,12 +1,16 @@
 "use client";
 
-import { Keyboard } from "lucide-react";
+import { Keyboard, LogOut } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { signOut } from "@/lib/api/session";
+import { LOGIN_PATH } from "@/lib/api/session-utils";
 import { useLanguage } from "./language-provider";
 import { useShortcuts } from "./shortcuts";
 import { useSidebar } from "./sidebar-state";
 
 export function SidebarFooter() {
 	const { t } = useLanguage();
+	const router = useRouter();
 	const { minimal } = useSidebar();
 	const { openHelpModal, shortcutsEnabled, shortcutsPreferenceLoading } =
 		useShortcuts();
@@ -29,6 +33,16 @@ export function SidebarFooter() {
 					</kbd>
 				</button>
 			)}
+			<button
+				type="button"
+				onClick={() => {
+					void signOut().finally(() => router.replace(LOGIN_PATH));
+				}}
+				className="flex items-center gap-1.5 w-full px-2.5 py-1.5 text-xs text-neutral-500 hover:text-neutral-800 hover:bg-neutral-200/60 rounded-lg transition-colors"
+			>
+				<LogOut className="w-3.5 h-3.5 text-neutral-400" />
+				{t("session.signOut")}
+			</button>
 			<PoweredBy />
 		</div>
 	);

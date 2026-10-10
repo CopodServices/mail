@@ -15,7 +15,9 @@ and adapted paths:
 - web/src/components/**       messages, compose, ui, contacts, mail-search, shortcuts, sidebar and shell components
 - web/src/hooks/**            client data hooks
 - web/src/lib/**              email parsing/formatting, i18n, time, folders, mailboxes, mail-api and search helpers
-- web/public/locales/id.json  Indonesian translations
+- web/public/locales/*.json   message catalogs ported from Mailflare, plus the
+                              strings this fork adds, for the 32 non-English
+                              locales registered in src/lib/i18n/locales.ts
 
 Mailflare's Cloudflare Workers backend (D1/drizzle schema, Worker entrypoints and
 Turnstile auth) was not carried over. The client talks to this repository's Rust

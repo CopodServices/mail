@@ -1,6 +1,6 @@
 import type { MessageCounts, MessageFolder } from "@/hooks/types";
-import { bulkMessageAction } from "@/lib/mail-api/client";
-import type { BulkMessageAction } from "@/lib/mail-api/types";
+import { bulkMessageAction } from "@/lib/api/endpoints";
+import type { BulkMessageAction } from "@/lib/api/types";
 
 export function getFolderNavCount(
 	folder: MessageFolder,

@@ -12,13 +12,13 @@ import {
 } from "@/components/compose/rich-text-utils";
 import { sanitizeEmailHtml } from "@/components/messages/message-detail/email-html-sanitizer";
 import { markMessagesReadInCaches } from "@/hooks/utils";
+import { bulkMessageAction } from "@/lib/api/endpoints";
+import type { BulkMessageAction } from "@/lib/api/types";
 import {
 	getEmailAddress,
 	normalizeEmailAddress,
 	splitEmailAddressList,
 } from "@/lib/email/address";
-import { bulkMessageAction } from "@/lib/mail-api/client";
-import type { BulkMessageAction } from "@/lib/mail-api/types";
 import { formatUserDate } from "@/lib/time/utils";
 import type {
 	ForwardDraftInput,

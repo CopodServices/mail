@@ -1,4 +1,4 @@
-import { MAIL_API_BASE } from "@/lib/mail-api/base";
+import { MAIL_API_BASE } from "@/lib/api/base";
 import { messageHref } from "@/lib/mail-routes";
 import type { NewMessageEvent } from "./message-realtime-types";
 

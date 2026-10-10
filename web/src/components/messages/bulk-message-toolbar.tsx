@@ -21,7 +21,7 @@ import { useLanguage } from "@/components/language-provider";
 import { useSelectedMailbox } from "@/components/mailbox-provider";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
-import type { BulkMessageAction } from "@/lib/mail-api/types";
+import type { BulkMessageAction } from "@/lib/api/types";
 import { supportsPermanentDelete } from "@/lib/messages/permanent-delete-utils";
 import type { BulkMessageToolbarProps } from "./types";
 import { useMailboxFolders } from "./use-mailbox-folders";

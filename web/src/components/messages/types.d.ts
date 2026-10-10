@@ -2,7 +2,7 @@ import type { TranslationKey } from "@/lib/i18n/types";
 import type { LucideIcon } from "lucide-react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import type { Message, MessageFolder } from "@/hooks/types";
-import type { BulkMessageAction } from "@/lib/mail-api/types";
+import type { BulkMessageAction } from "@/lib/api/types";
 
 export type MessageFolderConfig = {
 	folder: MessageFolder;

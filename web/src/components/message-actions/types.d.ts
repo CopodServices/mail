@@ -1,5 +1,5 @@
 import type { TranslationKey } from "@/lib/i18n/types";
-import type { BulkMessageAction } from "@/lib/mail-api/types";
+import type { BulkMessageAction } from "@/lib/api/types";
 import type { Message, MessageDirection } from "@/hooks/types";
 
 export type MessageActionsProps = {

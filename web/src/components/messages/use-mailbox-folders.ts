@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { CustomFolder } from "@/components/dashboard-nav-types";
-import { fetchFolders } from "@/lib/mail-api/client";
+import { fetchFolders } from "@/lib/api/endpoints";
 
 // Shared across toolbars so reopening a menu shows the folders immediately instead of popping in.
 const cache = new Map<string, CustomFolder[]>();
