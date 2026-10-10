@@ -677,6 +677,8 @@ pub struct MailboxResponse {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Appended to new messages composed from this mailbox.
     pub signature: Option<String>,
+    /// The name recipients see beside the address in the From header.
+    pub display_name: Option<String>,
 }
 
 impl From<entity::mailbox::Model> for MailboxResponse {
@@ -687,6 +689,7 @@ impl From<entity::mailbox::Model> for MailboxResponse {
             active: model.active,
             created_at: model.created_at,
             signature: model.signature,
+            display_name: model.display_name,
         }
     }
 }
@@ -697,6 +700,11 @@ pub struct UpdateMailboxRequest {
     /// it unchanged. The one field a mailbox session may set on itself.
     #[serde(default, deserialize_with = "double_option")]
     pub signature: Option<Option<String>>,
+    /// Replaces the name recipients see beside the address in the From header;
+    /// explicit null clears it, omitted leaves it unchanged. A mailbox session
+    /// may set this on its own mailbox, alongside the signature.
+    #[serde(default, deserialize_with = "double_option")]
+    pub display_name: Option<Option<String>>,
     /// Operator only: rotate the mailbox password.
     #[serde(default)]
     pub password: Option<String>,
@@ -3434,7 +3442,7 @@ pub async fn update_mailbox(
 ) -> Result<Response, ApiError> {
     let address = address.to_ascii_lowercase();
     if let Some(scope) = principal.scope() {
-        // A session may only edit the signature of its own mailbox.
+        // A session may only edit its own mailbox, and only its sender identity.
         if address != scope.address {
             return Err(not_found("Unknown mailbox"));
         }
@@ -3442,7 +3450,7 @@ pub async fn update_mailbox(
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "Forbidden",
-                "A session may only change its own signature",
+                "A session may only change its own signature and display name",
             )
             .code("forbidden"));
         }
@@ -3452,6 +3460,7 @@ pub async fn update_mailbox(
         &address,
         body.password.as_deref(),
         body.signature,
+        body.display_name,
         body.quota_bytes,
         body.active,
     )

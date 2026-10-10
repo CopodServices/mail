@@ -79,6 +79,7 @@ pub async fn update_mailbox(
     address: &str,
     password: Option<&str>,
     signature: Option<Option<String>>,
+    display_name: Option<Option<String>>,
     quota_bytes: Option<i64>,
     active: Option<bool>,
 ) -> Result<Option<mailbox::Model>> {
@@ -91,6 +92,9 @@ pub async fn update_mailbox(
     }
     if let Some(signature) = signature {
         model.signature = Set(signature);
+    }
+    if let Some(display_name) = display_name {
+        model.display_name = Set(display_name);
     }
     if let Some(quota_bytes) = quota_bytes {
         model.quota_bytes = Set(quota_bytes);
@@ -162,6 +166,7 @@ pub async fn create_mailbox(
         local_part: Set(parsed.local_part),
         password_hash: Set(crate::auth::hash_password(password)?),
         signature: Set(None),
+        display_name: Set(None),
         quota_bytes: Set(0),
         active: Set(true),
         created_at: Set(now),

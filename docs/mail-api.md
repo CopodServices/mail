@@ -45,7 +45,7 @@ Tenant lifecycle, behind the API key:
 | DELETE | /api/domains/{name} | Remove a domain and its mailboxes |
 | GET | /api/mailboxes | List mailboxes (?domain=<name> filters) |
 | POST | /api/mailboxes | Create a mailbox ({address, password}) |
-| PATCH | /api/mailboxes/{address} | {signature, password, quota_bytes, active} |
+| PATCH | /api/mailboxes/{address} | {signature, display_name, password, quota_bytes, active} |
 | DELETE | /api/mailboxes/{address} | Delete a mailbox |
 
 DKIM is not part of this API: the configured relay signs outbound mail, so each
@@ -77,7 +77,7 @@ The client's whole reading path is served by the API today:
 | GET | /api/folders | System and custom folders |
 | POST | /api/folders | Create a custom folder |
 | GET | /api/mailboxes | Mailboxes (a session sees only its own) |
-| PATCH | /api/mailboxes/{address} | Set the mailbox signature (a session may set only its own) |
+| PATCH | /api/mailboxes/{address} | Set the mailbox signature or display name (a session may set only its own) |
 | GET | /api/attachment-policy | Attachment limits for the composer |
 | POST | /api/drafts, /api/drafts/{id} | Drafts: create, read, update, discard (forward_of_message_id copies its attachments) |
 | POST | /api/drafts/{id}/attachments, DELETE /api/drafts/{id}/attachments/{index} | Draft attachments |

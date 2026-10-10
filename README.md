@@ -123,7 +123,7 @@ examples below run.
 | GET | /api/mailboxes | List mailboxes (a session sees only its own; ?domain=<name> filters) |
 | POST | /api/mailboxes | Create a mailbox ({address, password}) |
 | DELETE | /api/mailboxes/{address} | Delete a mailbox |
-| PATCH | /api/mailboxes/{address} | {signature, password, quota_bytes, active}; a session may set only its own signature |
+| PATCH | /api/mailboxes/{address} | {signature, display_name, password, quota_bytes, active}; a session may set only its own signature and display name |
 | GET | /api/domains | List domains |
 | POST | /api/domains | Create a tenant domain (idempotent) |
 | GET | /api/domains/{name} | One domain |

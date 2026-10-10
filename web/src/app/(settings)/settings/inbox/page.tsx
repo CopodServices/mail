@@ -6,6 +6,7 @@ import { BrowserNotificationSettings } from "@/components/settings/browser-notif
 import { InboxReadingLayoutSettings } from "@/components/settings/inbox-reading-layout-settings";
 import { InboxShortcutsSettings } from "@/components/settings/inbox-shortcuts-settings";
 import { InboxThreadingSettings } from "@/components/settings/inbox-threading-settings";
+import { MailboxDisplayNameForm } from "@/components/settings/mailbox-display-name-form";
 import { MailboxSignatureForm } from "@/components/settings/mailbox-signature-form";
 
 export default function SettingsInboxPage() {
@@ -65,6 +66,17 @@ export default function SettingsInboxPage() {
 							</p>
 						</div>
 						<InboxShortcutsSettings />
+					</div>
+					<div className="py-6 first:pt-0 last:pb-0">
+						<div className="mb-4">
+							<h3 className="text-base font-semibold text-neutral-900">
+								{t("settingsPage.inbox.displayName")}
+							</h3>
+							<p className="mt-1 text-sm text-neutral-500">
+								{t("settingsPage.inbox.displayNameDescription")}
+							</p>
+						</div>
+						<MailboxDisplayNameForm />
 					</div>
 					<div className="py-6 first:pt-0 last:pb-0">
 						<div className="mb-4">

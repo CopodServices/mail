@@ -13,6 +13,8 @@ pub struct Model {
     pub password_hash: String,
     /// Appended to new messages composed from this mailbox.
     pub signature: Option<String>,
+    /// The name recipients see beside the address in the From header.
+    pub display_name: Option<String>,
     pub quota_bytes: i64,
     pub active: bool,
     pub created_at: chrono::DateTime<Utc>,

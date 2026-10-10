@@ -24,6 +24,7 @@ export async function fetchMailboxOptions(
 							address: string;
 							active: boolean;
 							signature: string | null;
+							display_name: string | null;
 						}>;
 					}
 				).data ?? []
@@ -34,7 +35,9 @@ export async function fetchMailboxOptions(
 					domainId: "",
 					localPart,
 					hostname,
-					displayName: localPart,
+					// The stored name rides in the From header; the local part is
+					// only the fallback for a mailbox that has not set one.
+					displayName: mailbox.display_name ?? localPart,
 					signature: mailbox.signature ?? null,
 					hasAvatar: false,
 					type: "personal" as const,
