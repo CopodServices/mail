@@ -41,6 +41,9 @@ pub async fn store_local(
         mailcore::policy::AuthAction::Quarantine => message::Status::Quarantined,
         _ => message::Status::Stored,
     };
+    // A copy filed in the sender's own Sent folder is not an arrival, so only an
+    // inbound message tells connected clients that new mail landed.
+    let inbound = matches!(direction, message::Direction::Inbound);
 
     let inserted = repo::insert_message(
         &state.db,
@@ -68,17 +71,19 @@ pub async fn store_local(
     .await?;
 
     // Tell connected clients that mail arrived for this mailbox.
-    state.publish(
-        serde_json::json!({
-            "type": "new_message",
-            "messageId": inserted.id.to_string(),
-            "mailboxId": mailbox.id.to_string(),
-            "from": sender,
-            "fromName": serde_json::Value::Null,
-            "subject": inserted.subject,
-        })
-        .to_string(),
-    );
+    if inbound {
+        state.publish(
+            serde_json::json!({
+                "type": "new_message",
+                "messageId": inserted.id.to_string(),
+                "mailboxId": mailbox.id.to_string(),
+                "from": sender,
+                "fromName": serde_json::Value::Null,
+                "subject": inserted.subject,
+            })
+            .to_string(),
+        );
+    }
 
     Ok(inserted.id)
 }

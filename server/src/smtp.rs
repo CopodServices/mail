@@ -199,12 +199,23 @@ impl Session {
             return self.reply(503, 5, 5, 1, "TLS already active").await;
         }
 
-        let conn = self.conn.take().expect("connection is present");
-        if conn.has_buffered() {
-            self.conn = Some(conn);
+        // A buffered read cannot survive the switch to TLS, so refuse while the
+        // connection is still in the session and self.reply() can reach it.
+        if self
+            .conn
+            .as_ref()
+            .expect("connection is present")
+            .has_buffered()
+        {
             return self.reply(503, 5, 5, 1, "STARTTLS not permitted now").await;
         }
 
+        // The 220 must go out before the handshake, so it is written while the
+        // connection is still here: self.reply() reads self.conn and would panic
+        // once the connection has been taken for the TLS upgrade.
+        self.reply(220, 2, 0, 0, "Ready to start TLS").await?;
+
+        let conn = self.conn.take().expect("connection is present");
         let socket = match conn.into_inner() {
             InboundStream::Plain(socket) => socket,
             other => {
@@ -212,8 +223,6 @@ impl Session {
                 return self.reply(503, 5, 5, 1, "TLS already active").await;
             }
         };
-
-        self.reply(220, 2, 0, 0, "Ready to start TLS").await?;
 
         let acceptor = tokio_rustls::TlsAcceptor::from(config);
         match acceptor.accept(socket).await {
@@ -420,18 +429,31 @@ impl Session {
             }
         }
 
-        let direction = if self.mode == Mode::Inbound {
-            message::Direction::Inbound
-        } else {
-            message::Direction::Outbound
-        };
-
         let mut failed = false;
+
+        // A submission keeps the sender's own copy: that is what its Sent folder
+        // shows. Inbound mail has no local sender to file a copy for.
+        if let (Mode::Submission, Some(sender)) = (self.mode, self.authenticated.as_ref())
+            && let Err(err) = delivery::store_local(
+                &self.state,
+                sender,
+                message::Direction::Outbound,
+                &envelope_from,
+                &raw,
+                &outcome,
+            )
+            .await
+        {
+            warn!(error = %err, "failed to store the sender's copy");
+            failed = true;
+        }
+
+        // Either way a local recipient gets it in its inbox.
         for mailbox in &local {
             if let Err(err) = delivery::store_local(
                 &self.state,
                 mailbox,
-                direction.clone(),
+                message::Direction::Inbound,
                 &envelope_from,
                 &raw,
                 &outcome,

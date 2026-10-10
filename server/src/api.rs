@@ -3688,10 +3688,16 @@ pub async fn send(
     let scheduled_at = body.scheduled_at.filter(|at| *at > chrono::Utc::now());
     let mut stored = 0usize;
     let mut scheduled_copy = None;
-    for mailbox in &local {
+
+    // The sender's own copy: it is what its Sent folder shows, and the copy a
+    // scheduled send moves to Sent once the relay accepts it.
+    if let Some(mailbox) = repo::find_mailbox(&state.db, &sender)
+        .await
+        .map_err(db_error)?
+    {
         let message_id = delivery::store_local(
             &state,
-            mailbox,
+            &mailbox,
             message::Direction::Outbound,
             &sender,
             &raw,
@@ -3709,8 +3715,23 @@ pub async fn send(
                 Some("scheduled".to_string()),
             )
             .await?;
-            scheduled_copy.get_or_insert(message_id);
+            scheduled_copy = Some(message_id);
         }
+        stored += 1;
+    }
+
+    // A local recipient gets the message in its inbox.
+    for mailbox in &local {
+        delivery::store_local(
+            &state,
+            mailbox,
+            message::Direction::Inbound,
+            &sender,
+            &raw,
+            &outcome,
+        )
+        .await
+        .map_err(internal)?;
         stored += 1;
     }
 
