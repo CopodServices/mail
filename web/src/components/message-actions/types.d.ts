@@ -7,7 +7,8 @@ export type MessageActionsProps = {
 	mailboxId: string | null;
 	senderAddress: string;
 	direction: MessageDirection;
-	status: string;
+	/** The folder the message is in: a system folder or a custom id. */
+	folder: string;
 	read: boolean;
 	unsubscribeUrl?: string | null;
 	subject?: string | null;

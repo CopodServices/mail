@@ -111,6 +111,7 @@ pub async fn enqueue_remote(
     envelope_from: &str,
     recipients: &[String],
     raw: &[u8],
+    copy_message_id: Option<Uuid>,
 ) -> Result<Uuid> {
     enqueue_remote_at(
         state,
@@ -119,7 +120,10 @@ pub async fn enqueue_remote(
         recipients,
         raw,
         None,
-        None,
+        SendCopies {
+            copy_message_id,
+            scheduled_message_id: None,
+        },
     )
     .await
 }
@@ -133,7 +137,7 @@ pub async fn enqueue_remote_at(
     recipients: &[String],
     raw: &[u8],
     not_before: Option<chrono::DateTime<Utc>>,
-    scheduled_message_id: Option<Uuid>,
+    copies: SendCopies,
 ) -> Result<Uuid> {
     let id = Uuid::now_v7();
     let now = Utc::now();
@@ -155,7 +159,8 @@ pub async fn enqueue_remote_at(
             recipients: Set(serde_json::json!(recipients)),
             storage_key: Set(key),
             message_id: Set(metadata.message_id),
-            scheduled_message_id: Set(scheduled_message_id),
+            scheduled_message_id: Set(copies.scheduled_message_id),
+            copy_message_id: Set(copies.copy_message_id),
             attempts: Set(0),
             next_attempt_at: Set(not_before.unwrap_or(now)),
             status: Set(outbound_job::JobStatus::Pending),
@@ -167,6 +172,15 @@ pub async fn enqueue_remote_at(
     .await?;
 
     Ok(id)
+}
+
+/// The stored copies a queued send is linked to: the one the sender owns, which
+/// reports the job's state, and the one waiting in Scheduled (the same row),
+/// which the worker moves to Sent once it goes out.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendCopies {
+    pub copy_message_id: Option<Uuid>,
+    pub scheduled_message_id: Option<Uuid>,
 }
 
 /// True when storing `incoming` more bytes would exceed a positive quota. A

@@ -5,6 +5,7 @@ pub mod compose;
 pub mod config;
 pub mod meta;
 pub mod policy;
+pub mod query;
 pub mod queue;
 pub mod relay;
 pub mod repo;

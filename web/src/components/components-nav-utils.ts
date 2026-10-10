@@ -20,7 +20,7 @@ export async function preloadMailboxPage(href: string, mailboxId?: string) {
 	const params = getMessageQueryParams(
 		folder,
 		mailboxId,
-		{ limit: 25, offset: 0 },
+		{ limit: 25 },
 		customFolderMatch?.[1],
 	);
 	await fetchMessageList(params);

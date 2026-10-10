@@ -3,8 +3,8 @@ use chrono::Utc;
 use entity::{domain, mailbox, message, outbound_job};
 use sea_orm::sea_query::{Alias, Expr};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, FromQueryResult,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, ExprTrait,
+    FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -260,6 +260,41 @@ pub async fn list_messages(
 
 pub async fn get_message(db: &DatabaseConnection, id: Uuid) -> Result<Option<message::Model>> {
     Ok(message::Entity::find_by_id(id).one(db).await?)
+}
+
+/// The stored message carrying a given RFC Message-ID in one mailbox. Threads
+/// walk their ancestors with this, so it stays a point lookup.
+pub async fn find_message_by_message_id(
+    db: &DatabaseConnection,
+    mailbox_id: Uuid,
+    message_id: &str,
+) -> Result<Option<message::Model>> {
+    Ok(message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox_id))
+        .filter(message::Column::MessageId.eq(message_id))
+        .one(db)
+        .await?)
+}
+
+/// The candidates of a conversation: the root itself, anything that replies to
+/// it, and anything whose References header mentions it. The caller re-checks
+/// membership, because the References match is a substring one.
+pub async fn thread_candidates(
+    db: &DatabaseConnection,
+    mailbox_id: Uuid,
+    root: &str,
+) -> Result<Vec<message::Model>> {
+    Ok(message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox_id))
+        .filter(
+            Condition::any()
+                .add(message::Column::MessageId.eq(root))
+                .add(message::Column::InReplyTo.eq(root))
+                .add(message::Column::ReferencesHeader.like(format!("%{root}%"))),
+        )
+        .order_by_asc(message::Column::ReceivedAt)
+        .all(db)
+        .await?)
 }
 
 pub async fn delete_message(db: &DatabaseConnection, id: Uuid) -> Result<Option<message::Model>> {

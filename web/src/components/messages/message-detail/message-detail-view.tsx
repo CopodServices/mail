@@ -16,6 +16,7 @@ import { EmailHtmlRenderer } from "@/components/messages/email-html-renderer";
 import { MessageDetailNavigation } from "@/components/messages/message-detail-navigation";
 import { useMessageListVisibility } from "@/components/messages/message-list-visibility";
 import { MessageReadingHeaderButton } from "@/components/messages/message-reading-header-button";
+import { MessageStateChips } from "@/components/messages/message-state-chips";
 import { QuotedEmailToggle } from "@/components/messages/quoted-email-toggle";
 import { RecipientList } from "@/components/messages/recipient-list";
 import { ScheduledSendBanner } from "@/components/messages/scheduled-send-banner";
@@ -180,7 +181,7 @@ export function MessageDetailView({ messageId }: { messageId: string }) {
 					mailboxId={message.mailboxId}
 					senderAddress={message.fromAddr}
 					direction={message.direction}
-					status={message.status}
+					folder={message.folder}
 					read={message.read}
 					unsubscribeUrl={data.unsubscribeUrl}
 					subject={message.subject}
@@ -295,6 +296,7 @@ export function MessageDetailView({ messageId }: { messageId: string }) {
 								</div>
 							</div>
 							<div className="flex shrink-0 items-center gap-2">
+								<MessageStateChips message={message} />
 								<p className="text-xs">
 									{scheduledAt
 										? formatScheduledSendTime(scheduledAt, t)

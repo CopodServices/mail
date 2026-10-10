@@ -102,7 +102,7 @@ examples below run.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | /api/messages | List stored mail. Filters: mailbox, mailbox_id, folder, direction, q, read, starred, limit, offset |
+| GET | /api/messages | List stored mail, newest first. Filters: mailbox, mailbox_id, folder, direction, q, read, starred, limit, cursor |
 | GET | /api/messages/counts | Per-folder and per-mailbox totals and unread counts |
 | GET | /api/messages/{id} | Message with body (text/html) and the attachment list |
 | GET | /api/messages/{id}/raw | Raw RFC5322 message from S3 |

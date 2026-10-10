@@ -49,7 +49,7 @@ export function MessageActions({
 	mailboxId,
 	senderAddress,
 	direction,
-	status,
+	folder,
 	read,
 	unsubscribeUrl,
 	subject,
@@ -94,7 +94,7 @@ export function MessageActions({
 
 	// In Trash and Spam the delete button removes the message for good instead of
 	// being a no-op, after the user confirms.
-	const canDeleteForever = supportsPermanentDelete(status);
+	const canDeleteForever = supportsPermanentDelete(folder);
 	const deleteForever = useCallback(async () => {
 		if (!window.confirm(getPermanentDeleteConfirmText(1, t))) return;
 		setMoreOpen(false);
@@ -102,13 +102,13 @@ export function MessageActions({
 		setError(null);
 		try {
 			await runSingleMessageAction(messageId, "delete");
-			router.push(getMessageBackHref(direction, status));
+			router.push(getMessageBackHref(direction, folder));
 			router.refresh();
 		} catch {
 			setError(t("actions.error.delete"));
 			setPendingAction(null);
 		}
-	}, [messageId, direction, status, router, t]);
+	}, [messageId, direction, folder, router, t]);
 	const onTrashClick = () =>
 		canDeleteForever ? void deleteForever() : void runAction("trash");
 	const trashLabel = canDeleteForever
@@ -179,7 +179,7 @@ export function MessageActions({
 				label: t("shortcut.archiveMessage"),
 				category: "Actions" as const,
 				action: () => {
-					if (status !== "archived") void runAction("archive");
+					if (folder !== "archived") void runAction("archive");
 				},
 			},
 			{
@@ -187,7 +187,7 @@ export function MessageActions({
 				label: t("shortcut.archiveMessage"),
 				category: "Actions" as const,
 				action: () => {
-					if (status !== "archived") void runAction("archive");
+					if (folder !== "archived") void runAction("archive");
 				},
 			},
 			{
@@ -195,7 +195,7 @@ export function MessageActions({
 				label: t("shortcut.moveToTrash"),
 				category: "Actions" as const,
 				action: () => {
-					if (status !== "trash") void runAction("trash");
+					if (folder !== "trash") void runAction("trash");
 				},
 			},
 			{
@@ -209,7 +209,7 @@ export function MessageActions({
 				label: t("shortcut.reportSpam"),
 				category: "Actions" as const,
 				action: () => {
-					if (status !== "spam" && direction === "inbound")
+					if (folder !== "spam" && direction === "inbound")
 						void runAction("spam");
 				},
 			},
@@ -220,7 +220,7 @@ export function MessageActions({
 				action: () => router.back(),
 			},
 		],
-		[status, direction, runAction, handleReply, router, t],
+		[folder, direction, runAction, handleReply, router, t],
 	);
 
 	useHotkeys(shortcuts, { enabled: shortcutsEnabled });
@@ -264,7 +264,7 @@ export function MessageActions({
 	}
 	const disabled = pendingAction !== null;
 	const markAction: BulkMessageAction = read ? "unread" : "read";
-	const moveActions = getMoveMessageActions(status, direction);
+	const moveActions = getMoveMessageActions(folder, direction);
 
 	return (
 		<div className="flex flex-wrap items-center gap-3 text-neutral-600 flex-1 min-w-0">
@@ -295,7 +295,7 @@ export function MessageActions({
 						variant="ghost"
 						size="roundedSM"
 						aria-label={t("common.reportSpam")}
-						disabled={disabled || status === "spam" || direction !== "inbound"}
+						disabled={disabled || folder === "spam" || direction !== "inbound"}
 						onClick={() => runAction("spam")}
 					>
 						<ShieldAlert size={iconSize} />
@@ -317,7 +317,7 @@ export function MessageActions({
 									? t("actions.archiveHint")
 									: t("common.archive")
 							}
-							disabled={disabled || status === "archived"}
+							disabled={disabled || folder === "archived"}
 							onClick={() => runAction("archive")}
 						>
 							<Archive size={iconSize} />
@@ -339,7 +339,7 @@ export function MessageActions({
 									: t("common.reportSpam")
 							}
 							disabled={
-								disabled || status === "spam" || direction !== "inbound"
+								disabled || folder === "spam" || direction !== "inbound"
 							}
 							onClick={() => runAction("spam")}
 						>
@@ -458,7 +458,7 @@ export function MessageActions({
 								<button
 									type="button"
 									className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100 disabled:text-neutral-400"
-									disabled={status === "archived"}
+									disabled={folder === "archived"}
 									onClick={() => void runAction("archive")}
 								>
 									<Archive className="h-4 w-4" />
@@ -505,25 +505,26 @@ export function MessageActions({
 								<hr className="my-1 border-neutral-100" />
 							</>
 						)}
-						{direction === "inbound" && status === "received" && (
-							<button
-								type="button"
-								className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100"
-								onClick={() => {
-									setMoreOpen(false);
-									setSnoozeOpen(true);
-								}}
-							>
-								<Clock className="h-4 w-4" />
-								{t("common.snooze")}
-							</button>
-						)}
+						{direction === "inbound" &&
+							(folder === "inbox" || folder === "snoozed") && (
+								<button
+									type="button"
+									className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100"
+									onClick={() => {
+										setMoreOpen(false);
+										setSnoozeOpen(true);
+									}}
+								>
+									<Clock className="h-4 w-4" />
+									{t("common.snooze")}
+								</button>
+							)}
 						{direction === "inbound" && (
 							<>
 								<button
 									type="button"
 									className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:text-neutral-400"
-									disabled={!unsubscribeUrl && status === "trash"}
+									disabled={!unsubscribeUrl && folder === "trash"}
 									onClick={() => void onUnsubscribe()}
 								>
 									<BellOff className="h-4 w-4 shrink-0" />

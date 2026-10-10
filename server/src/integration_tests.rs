@@ -1,14 +1,16 @@
 use crate::smtp::{self, Mode};
 use crate::state::AppState;
+use chrono::Utc;
 use entity::message;
 use entity::outbound_job;
 use mailcore::config::{Config, RelayConfig, RelayEncryption, S3Config, TlsConfig};
+use mailcore::query;
 use mailcore::queue::Queue;
 use mailcore::relay::Relay;
 use mailcore::repo;
 use mailcore::store::MailStore;
 use migration::{Migrator, MigratorTrait};
-use sea_orm::{ColumnTrait, Database, EntityTrait, QueryFilter};
+use sea_orm::{ActiveModelTrait, ColumnTrait, Database, EntityTrait, QueryFilter, Set};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -501,4 +503,375 @@ async fn sessions_scope_a_mailbox_and_the_operator_key_manages_tenants() {
         .filter(entity::domain::Column::Name.eq(domain))
         .exec(&db)
         .await;
+}
+
+/// The folder classification, the counts and the keyset pages all read the same
+/// reader state, and a copy in the sender's own Sent folder is never unread.
+/// Postgres alone is enough:
+///
+///     MAIL_TEST_INTEGRATION=1 cargo test --all keyset_and_counts
+#[tokio::test]
+async fn keyset_and_counts_follow_the_reader_state() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    let config = test_config();
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+
+    let domain = format!("keyset-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let mailbox = repo::create_mailbox(&db, &format!("inbox@{domain}"), "secret")
+        .await
+        .unwrap();
+
+    // Three arrivals, a quarantined one, the sender's own copy, a draft, a
+    // snoozed one and a starred one, oldest last.
+    // Every fixture row is tracked, because deleting the mailbox leaves the
+    // messages behind with a null mailbox_id.
+    let mut fixtures = Vec::new();
+    for minutes_ago in [5, 4, 3] {
+        fixtures.push(
+            insert_message(
+                &db,
+                &mailbox,
+                message::Direction::Inbound,
+                message::Status::Stored,
+                minutes_ago,
+            )
+            .await,
+        );
+    }
+    let quarantined = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Quarantined,
+        2,
+    )
+    .await;
+    fixtures.push(quarantined);
+    let sent = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Outbound,
+        message::Status::Stored,
+        0,
+    )
+    .await;
+    fixtures.push(sent);
+    let draft = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Stored,
+        6,
+    )
+    .await;
+    fixtures.push(draft);
+    set_flag(&db, draft, true, false, "drafts", None).await;
+    let snoozed = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Stored,
+        7,
+    )
+    .await;
+    fixtures.push(snoozed);
+    set_flag(
+        &db,
+        snoozed,
+        false,
+        false,
+        "inbox",
+        Some(Utc::now() + chrono::Duration::hours(2)),
+    )
+    .await;
+    let starred = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Stored,
+        8,
+    )
+    .await;
+    fixtures.push(starred);
+    set_flag(&db, starred, false, true, "inbox", None).await;
+
+    let counts = query::folder_counts(&db, Some(mailbox.id)).await.unwrap();
+    let folder = |name: &str| counts.folders.get(name).copied().unwrap_or((0, 0));
+    assert_eq!(
+        folder("inbox"),
+        (4, 4),
+        "arrivals, the starred one included"
+    );
+    assert_eq!(folder("spam"), (1, 1));
+    assert_eq!(folder("drafts"), (1, 0), "a draft is never unread");
+    assert_eq!(folder("snoozed"), (1, 1));
+    assert_eq!(
+        folder("sent"),
+        (1, 0),
+        "the sender's own copy is not unread"
+    );
+    assert_eq!(counts.starred, (1, 1));
+    assert_eq!(counts.mailboxes.get(&mailbox.id), Some(&(8, 6)));
+
+    // The pages walk the mailbox newest first and stop at the end.
+    let filters = query::MessageFilters {
+        mailbox_id: Some(mailbox.id),
+        ..query::MessageFilters::default()
+    };
+    let mut seen: Vec<Uuid> = Vec::new();
+    let mut cursor = None;
+    for _ in 0..4 {
+        let page = query::message_page(&db, &filters, cursor, 3).await.unwrap();
+        assert_eq!(page.total, 8);
+        seen.extend(page.ids.iter().copied());
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 8, "every message is on exactly one page");
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 8, "no page repeats a message");
+    assert_eq!(seen[0], sent, "the newest message leads the first page");
+    assert_eq!(seen[7], starred, "the oldest message ends the last page");
+
+    // The unread filter and the navigation order agree with the counts.
+    let unread = query::navigation(
+        &db,
+        &query::MessageFilters {
+            read: Some("unread".to_string()),
+            ..filters.clone()
+        },
+        query::NAVIGATION_CAP,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !unread.iter().any(|(id, _)| *id == sent || *id == draft),
+        "neither the sent copy nor the draft is unread"
+    );
+    assert_eq!(unread.iter().filter(|(_, unread)| *unread).count(), 6);
+    assert!(unread.iter().any(|(id, _)| *id == quarantined));
+
+    for id in fixtures {
+        repo::delete_message(&db, id).await.unwrap();
+    }
+    let _ = repo::delete_mailbox(&db, &mailbox.address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
+/// A queued copy reports the state of the job carrying it, and a scheduled one
+/// also reports when it goes out. Postgres alone is enough:
+///
+///     MAIL_TEST_INTEGRATION=1 cargo test --all queued_copy
+#[tokio::test]
+async fn a_queued_copy_reports_its_send_state() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    let config = test_config();
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+
+    let domain = format!("queue-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let mailbox = repo::create_mailbox(&db, &format!("inbox@{domain}"), "secret")
+        .await
+        .unwrap();
+
+    let waiting = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Outbound,
+        message::Status::Stored,
+        0,
+    )
+    .await;
+    let refused = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Outbound,
+        message::Status::Stored,
+        1,
+    )
+    .await;
+    let later = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Outbound,
+        message::Status::Stored,
+        2,
+    )
+    .await;
+    let untouched = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Stored,
+        3,
+    )
+    .await;
+
+    let due = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+    queue_job(
+        &db,
+        &mailbox,
+        waiting,
+        outbound_job::JobStatus::Pending,
+        None,
+        None,
+    )
+    .await;
+    queue_job(
+        &db,
+        &mailbox,
+        refused,
+        outbound_job::JobStatus::Failed,
+        Some("550 rejected by the relay"),
+        None,
+    )
+    .await;
+    queue_job(
+        &db,
+        &mailbox,
+        later,
+        outbound_job::JobStatus::Pending,
+        None,
+        Some(due),
+    )
+    .await;
+
+    let ids = vec![waiting, refused, later, untouched];
+    let states = query::send_states(&db, &ids).await.unwrap();
+    assert_eq!(
+        states.get(&waiting).map(|state| state.state),
+        Some("queued")
+    );
+    let failed = states.get(&refused).expect("the refused copy has a job");
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.error.as_deref(), Some("550 rejected by the relay"));
+    assert_eq!(states.get(&later).map(|state| state.state), Some("queued"));
+    assert!(
+        !states.contains_key(&untouched),
+        "an arrival nothing queued carries no send state"
+    );
+
+    let times = query::scheduled_times(&db, &ids).await.unwrap();
+    assert_eq!(times.get(&later), Some(&due));
+    assert_eq!(times.len(), 1, "only the scheduled copy has a time");
+    assert!(
+        !times.contains_key(&refused),
+        "a failed job is not a schedule"
+    );
+
+    for id in ids {
+        repo::delete_message(&db, id).await.unwrap();
+    }
+    let _ = repo::delete_mailbox(&db, &mailbox.address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
+/// Queues a job for a stored copy: the fixture does not need object storage.
+async fn queue_job(
+    db: &sea_orm::DatabaseConnection,
+    mailbox: &entity::mailbox::Model,
+    copy_message_id: Uuid,
+    status: outbound_job::JobStatus,
+    last_error: Option<&str>,
+    scheduled_at: Option<chrono::DateTime<Utc>>,
+) {
+    let now = Utc::now();
+    repo::enqueue_job(
+        db,
+        outbound_job::ActiveModel {
+            id: Set(Uuid::now_v7()),
+            mailbox_id: Set(Some(mailbox.id)),
+            envelope_from: Set(mailbox.address.clone()),
+            recipients: Set(serde_json::json!(["remote@elsewhere.test"])),
+            storage_key: Set(format!("fixtures/job-{}", Uuid::now_v7().simple())),
+            message_id: Set(None),
+            scheduled_message_id: Set(scheduled_at.map(|_| copy_message_id)),
+            copy_message_id: Set(Some(copy_message_id)),
+            attempts: Set(0),
+            next_attempt_at: Set(scheduled_at.unwrap_or(now)),
+            status: Set(status),
+            last_error: Set(last_error.map(str::to_string)),
+            created_at: Set(now),
+            updated_at: Set(now),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Stores a message row directly: the fixture does not need object storage.
+async fn insert_message(
+    db: &sea_orm::DatabaseConnection,
+    mailbox: &entity::mailbox::Model,
+    direction: message::Direction,
+    status: message::Status,
+    minutes_ago: i64,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    repo::insert_message(
+        db,
+        message::ActiveModel {
+            id: Set(id),
+            mailbox_id: Set(Some(mailbox.id)),
+            direction: Set(direction),
+            status: Set(status),
+            envelope_from: Set("sender@remote.test".to_string()),
+            envelope_to: Set(mailbox.address.clone()),
+            message_id: Set(Some(format!("<{id}@remote.test>"))),
+            subject: Set(Some(format!("message {minutes_ago}"))),
+            size_bytes: Set(64),
+            storage_key: Set(format!("fixtures/{id}.eml")),
+            received_at: Set(Utc::now() - chrono::Duration::minutes(minutes_ago)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+async fn set_flag(
+    db: &sea_orm::DatabaseConnection,
+    message_id: Uuid,
+    read: bool,
+    starred: bool,
+    folder: &str,
+    snoozed_until: Option<chrono::DateTime<Utc>>,
+) {
+    entity::message_flag::ActiveModel {
+        message_id: Set(message_id),
+        read: Set(read),
+        starred: Set(starred),
+        folder: Set(folder.to_string()),
+        snoozed_until: Set(snoozed_until),
+        updated_at: Set(Utc::now()),
+    }
+    .insert(db)
+    .await
+    .unwrap();
 }

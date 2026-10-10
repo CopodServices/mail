@@ -11,11 +11,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use entity::{contact, folder, message, message_flag, outbound_job, setting, template};
 use mailcore::policy::AuthOutcome;
+use mailcore::query;
 use mailcore::{address, repo};
 use mailcore::{body, compose, store};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::{OpenApi, ToSchema};
@@ -546,19 +546,19 @@ impl<T: Serialize> ListResponse<T> {
             meta: Meta {
                 total,
                 limit: None,
-                offset: None,
+                next_cursor: None,
             },
         }
     }
 
     /// A paginated collection: total is the filtered count, not the page size.
-    fn page(data: Vec<T>, total: i64, limit: u64, offset: u64) -> Self {
+    fn page(data: Vec<T>, total: i64, limit: u64, next_cursor: Option<String>) -> Self {
         Self {
             data,
             meta: Meta {
                 total,
                 limit: Some(limit),
-                offset: Some(offset),
+                next_cursor,
             },
         }
     }
@@ -575,8 +575,9 @@ pub struct Meta {
     pub total: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
+    /// The opaque cursor for the page after this one, absent on the last page.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub offset: Option<u64>,
+    pub next_cursor: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +607,58 @@ pub struct MessageResponse {
     pub snoozed_until: Option<chrono::DateTime<chrono::Utc>>,
     /// inbox, sent, spam, trash, archived, snoozed, scheduled, or a folder id.
     pub folder: String,
+    /// When a scheduled message leaves the Scheduled folder.
+    pub scheduled_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The state of the job delivering this copy: queued, sending, sent or
+    /// failed. Absent when nothing queued it.
+    pub send_state: Option<String>,
+    /// Why a delivery failed, when it did.
+    pub send_error: Option<String>,
+}
+
+/// The delivery state of a stored copy, read from the outbound job that owns
+/// it. Absent for inbound mail and for a message delivered only locally.
+#[derive(Debug, Default, Clone)]
+pub struct MessageExtras {
+    pub scheduled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub send_state: Option<String>,
+    pub send_error: Option<String>,
+}
+
+/// Loads the delivery state of a page of messages in two lookups.
+async fn message_extras(
+    state: &AppState,
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, MessageExtras>, ApiError> {
+    let scheduled = query::scheduled_times(&state.db, ids)
+        .await
+        .map_err(db_error)?;
+    let sends = query::send_states(&state.db, ids).await.map_err(db_error)?;
+    let mut extras = std::collections::HashMap::new();
+    for id in ids {
+        let scheduled_at = scheduled.get(id).copied();
+        let send = sends.get(id);
+        if scheduled_at.is_none() && send.is_none() {
+            continue;
+        }
+        extras.insert(
+            *id,
+            MessageExtras {
+                scheduled_at,
+                send_state: send.map(|send| send.state.to_string()),
+                send_error: send.and_then(|send| send.error.clone()),
+            },
+        );
+    }
+    Ok(extras)
+}
+
+/// The delivery state of one message.
+async fn message_extras_for(state: &AppState, id: Uuid) -> Result<MessageExtras, ApiError> {
+    Ok(message_extras(state, &[id])
+        .await?
+        .remove(&id)
+        .unwrap_or_default())
 }
 
 /// The folder a message is in: the stored flag when there is one, otherwise the
@@ -632,12 +685,22 @@ fn folder_of(model: &message::Model, flag: Option<&message_flag::Model>) -> Stri
 }
 
 impl MessageResponse {
-    fn with_flags(model: message::Model, flag: Option<&message_flag::Model>) -> Self {
+    fn with_flags(
+        model: message::Model,
+        flag: Option<&message_flag::Model>,
+        extras: MessageExtras,
+    ) -> Self {
         Self {
             folder: folder_of(&model, flag),
-            read: flag.map(|flag| flag.read).unwrap_or(false),
+            // The copy the sender owns is read by definition; only inbound mail
+            // carries an unread state.
+            read: flag.map(|flag| flag.read).unwrap_or(false)
+                || model.direction == message::Direction::Outbound,
             starred: flag.map(|flag| flag.starred).unwrap_or(false),
             snoozed_until: flag.and_then(|flag| flag.snoozed_until),
+            scheduled_at: extras.scheduled_at,
+            send_state: extras.send_state,
+            send_error: extras.send_error,
             ..MessageResponse::from(model)
         }
     }
@@ -665,6 +728,9 @@ impl From<message::Model> for MessageResponse {
             starred: false,
             snoozed_until: None,
             folder: "inbox".to_string(),
+            scheduled_at: None,
+            send_state: None,
+            send_error: None,
         }
     }
 }
@@ -841,7 +907,37 @@ pub struct MessageQuery {
     /// "true" restricts the list to starred messages.
     pub starred: Option<String>,
     pub limit: Option<u64>,
-    pub offset: Option<u64>,
+    /// The opaque cursor a previous page returned; the list resumes after it.
+    pub cursor: Option<String>,
+}
+
+impl MessageQuery {
+    /// The SQL filters this query asks for. Only the mailbox scope is shared
+    /// with the counts, which ignore the list's own filters.
+    async fn filters(
+        &self,
+        state: &AppState,
+        scope: Option<Uuid>,
+    ) -> Result<query::MessageFilters, ApiError> {
+        Ok(query::MessageFilters {
+            mailbox_id: resolve_mailbox(state, self, scope).await?,
+            folder: self.folder.clone(),
+            direction: self.direction.clone(),
+            q: self.q.clone(),
+            read: self.read.clone(),
+            starred: self.starred.as_deref() == Some("true"),
+        })
+    }
+
+    /// The keyset cursor the client asked for, if it is one we wrote.
+    fn cursor(&self) -> Result<Option<query::MessageCursor>, ApiError> {
+        match self.cursor.as_deref() {
+            None => Ok(None),
+            Some(value) => query::MessageCursor::decode(value)
+                .map(Some)
+                .ok_or_else(|| bad_request("Unknown cursor")),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1036,80 +1132,6 @@ async fn upsert_flag(
     }
 }
 
-/// Loads the messages matching a query, newest first, with their reader flags.
-/// Folder, read and starred live in message_flags, so filtering happens here.
-async fn filtered_messages(
-    state: &AppState,
-    query: &MessageQuery,
-    scope: Option<Uuid>,
-) -> Result<Vec<(message::Model, Option<message_flag::Model>)>, ApiError> {
-    let mailbox_id = resolve_mailbox(state, query, scope).await?;
-
-    let mut condition = Condition::all();
-    if let Some(mailbox_id) = mailbox_id {
-        condition = condition.add(message::Column::MailboxId.eq(mailbox_id));
-    }
-    match query.direction.as_deref() {
-        Some("inbound") => {
-            condition = condition.add(message::Column::Direction.eq(message::Direction::Inbound));
-        }
-        Some("outbound") => {
-            condition = condition.add(message::Column::Direction.eq(message::Direction::Outbound));
-        }
-        _ => {}
-    }
-    if let Some(text) = query.q.as_deref().filter(|value| !value.trim().is_empty()) {
-        let like = format!("%{}%", text.trim());
-        condition = condition.add(
-            Condition::any()
-                .add(message::Column::Subject.like(&like))
-                .add(message::Column::EnvelopeFrom.like(&like))
-                .add(message::Column::EnvelopeTo.like(&like)),
-        );
-    }
-
-    let rows = message::Entity::find()
-        .filter(condition)
-        .order_by_desc(message::Column::ReceivedAt)
-        .limit(5000)
-        .all(&state.db)
-        .await
-        .map_err(db_error)?;
-
-    let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
-    let flags = load_flags(state, &ids).await?;
-    let mut items: Vec<(message::Model, Option<message_flag::Model>)> = rows
-        .into_iter()
-        .map(|row| {
-            let flag = flags.iter().find(|flag| flag.message_id == row.id).cloned();
-            (row, flag)
-        })
-        .collect();
-
-    if let Some(folder) = query.folder.as_deref().filter(|value| !value.is_empty()) {
-        if folder == "starred" {
-            // Starred is a flag view, not a folder a message is moved into.
-            items.retain(|(_, flag)| flag.as_ref().map(|flag| flag.starred).unwrap_or(false));
-        } else {
-            items.retain(|(row, flag)| folder_of(row, flag.as_ref()) == folder);
-        }
-    }
-    match query.read.as_deref() {
-        Some("read") => {
-            items.retain(|(_, flag)| flag.as_ref().map(|flag| flag.read).unwrap_or(false))
-        }
-        Some("unread") => {
-            items.retain(|(_, flag)| !flag.as_ref().map(|flag| flag.read).unwrap_or(false))
-        }
-        _ => {}
-    }
-    if query.starred.as_deref() == Some("true") {
-        items.retain(|(_, flag)| flag.as_ref().map(|flag| flag.starred).unwrap_or(false));
-    }
-
-    Ok(items)
-}
-
 #[derive(Debug, Serialize, ToSchema)]
 pub struct NavigationEntry {
     pub id: Uuid,
@@ -1146,26 +1168,41 @@ pub struct EmptyResponse {
     pub remaining: usize,
 }
 
-/// Walks In-Reply-To back to the oldest stored ancestor and returns its id.
-fn thread_root(start: &message::Model, rows: &[message::Model]) -> String {
-    let mut current = start;
+/// How many ancestors the walk follows before it gives up. A conversation
+/// deeper than this is pathological, and the thread list is not the place to
+/// resolve it.
+const THREAD_DEPTH_CAP: usize = 20;
+
+/// Walks In-Reply-To back to the oldest stored ancestor, one point lookup per
+/// hop, and returns its id.
+async fn thread_root_for(state: &AppState, start: &message::Model) -> Result<String, ApiError> {
+    let Some(mailbox_id) = start.mailbox_id else {
+        return Ok(start
+            .message_id
+            .clone()
+            .unwrap_or_else(|| start.id.to_string()));
+    };
+    let mut current = start.clone();
     let mut visited = std::collections::HashSet::new();
-    while let Some(parent_id) = current.in_reply_to.as_deref() {
-        if !visited.insert(parent_id.to_string()) {
+    while visited.len() < THREAD_DEPTH_CAP {
+        let Some(parent_id) = current.in_reply_to.clone() else {
+            break;
+        };
+        if !visited.insert(parent_id.clone()) {
             break;
         }
-        match rows
-            .iter()
-            .find(|row| row.message_id.as_deref() == Some(parent_id))
+        match repo::find_message_by_message_id(&state.db, mailbox_id, &parent_id)
+            .await
+            .map_err(db_error)?
         {
             Some(parent) => current = parent,
             None => break,
         }
     }
-    current
+    Ok(current
         .message_id
         .clone()
-        .unwrap_or_else(|| current.id.to_string())
+        .unwrap_or_else(|| current.id.to_string()))
 }
 
 /// True when a message belongs to the conversation identified by the root id.
@@ -1225,8 +1262,8 @@ pub async fn attachment_policy(
         ("q" = Option<String>, Query, description = "Match subject and addresses"),
         ("read" = Option<String>, Query, description = "read or unread"),
         ("starred" = Option<String>, Query, description = "true for starred only"),
-        ("limit" = Option<u64>, Query, description = "Page size (default 50)"),
-        ("offset" = Option<u64>, Query, description = "Rows to skip")
+        ("limit" = Option<u64>, Query, description = "Page size (default 50, max 200)"),
+        ("cursor" = Option<String>, Query, description = "Cursor the previous page returned")
     ),
     responses((status = 200, description = "Stored messages", body = ListResponse<MessageResponse>))
 )]
@@ -1235,18 +1272,34 @@ pub async fn list_messages(
     principal: Principal,
     Query(query): Query<MessageQuery>,
 ) -> Result<Response, ApiError> {
-    let items = filtered_messages(&state, &query, principal.mailbox_scope()).await?;
-    let total = items.len() as i64;
+    let filters = query.filters(&state, principal.mailbox_scope()).await?;
+    let cursor = query.cursor()?;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
-    let offset = query.offset.unwrap_or(0);
-    let page = items
-        .into_iter()
-        .skip(offset as usize)
-        .take(limit as usize)
-        .map(|(row, flag)| MessageResponse::with_flags(row, flag.as_ref()))
-        .collect();
+    let page = query::message_page(&state.db, &filters, cursor, limit)
+        .await
+        .map_err(db_error)?;
 
-    Ok(ListResponse::page(page, total, limit, offset).into_response())
+    // The ids come back in page order; fetch the rows and their state to match.
+    let rows = message::Entity::find()
+        .filter(message::Column::Id.is_in(page.ids.clone()))
+        .all(&state.db)
+        .await
+        .map_err(db_error)?;
+    let flags = load_flags(&state, &page.ids).await?;
+    let mut extras = message_extras(&state, &page.ids).await?;
+
+    let mut messages = Vec::with_capacity(page.ids.len());
+    for id in &page.ids {
+        let Some(row) = rows.iter().find(|row| row.id == *id).cloned() else {
+            continue;
+        };
+        let flag = flags.iter().find(|flag| flag.message_id == *id);
+        let extras = extras.remove(id).unwrap_or_default();
+        messages.push(MessageResponse::with_flags(row, flag, extras));
+    }
+
+    let next_cursor = page.next.map(|cursor| cursor.encode());
+    Ok(ListResponse::page(messages, page.total, limit, next_cursor).into_response())
 }
 
 #[utoipa::path(
@@ -1294,7 +1347,11 @@ pub async fn get_message(
         StatusCode::OK,
         Json(DataResponse {
             data: MessageDetailResponse {
-                message: MessageResponse::with_flags(message, flag.as_ref()),
+                message: MessageResponse::with_flags(
+                    message,
+                    flag.as_ref(),
+                    message_extras_for(&state, id).await?,
+                ),
                 text: parsed.text,
                 html: parsed.html,
                 attachments,
@@ -1430,7 +1487,11 @@ async fn set_snooze(
         model.insert(&state.db).await.map_err(db_error)?
     };
     Ok(Json(DataResponse {
-        data: MessageResponse::with_flags(message, Some(&flag)),
+        data: MessageResponse::with_flags(
+            message,
+            Some(&flag),
+            message_extras_for(state, id).await?,
+        ),
     })
     .into_response())
 }
@@ -1491,7 +1552,11 @@ async fn flag_message(
         .ok_or_else(|| not_found("Unknown message"))?;
     ensure_scope(principal, message.mailbox_id, "Unknown message")?;
     let flag = upsert_flag(state, id, read, starred, folder).await?;
-    Ok(MessageResponse::with_flags(message, Some(&flag)))
+    Ok(MessageResponse::with_flags(
+        message,
+        Some(&flag),
+        message_extras_for(state, id).await?,
+    ))
 }
 
 #[utoipa::path(
@@ -1633,7 +1698,12 @@ pub async fn message_counts(
     principal: Principal,
     Query(query): Query<MessageQuery>,
 ) -> Result<Response, ApiError> {
-    let items = filtered_messages(&state, &query, principal.mailbox_scope()).await?;
+    // The counts cover the whole mailbox: folding the list's own filters in
+    // would make the sidebar numbers depend on the page that is open.
+    let mailbox_id = resolve_mailbox(&state, &query, principal.mailbox_scope()).await?;
+    let counts = query::folder_counts(&state.db, mailbox_id)
+        .await
+        .map_err(db_error)?;
 
     let mut folders: std::collections::BTreeMap<String, FolderCount> = SYSTEM_FOLDERS
         .iter()
@@ -1647,63 +1717,44 @@ pub async fn message_counts(
             )
         })
         .collect();
-    let mut mailboxes: std::collections::BTreeMap<Uuid, MailboxCount> =
-        std::collections::BTreeMap::new();
-
-    for (row, flag) in &items {
-        let folder = folder_of(row, flag.as_ref());
-        let unread = !flag.as_ref().map(|flag| flag.read).unwrap_or(false);
-
-        if let Some(entry) = folders.get_mut(&folder) {
-            entry.total += 1;
-            if unread {
-                entry.unread += 1;
-            }
-        }
-        if flag.as_ref().map(|flag| flag.starred).unwrap_or(false)
-            && let Some(entry) = folders.get_mut("starred")
-        {
-            entry.total += 1;
-            if unread {
-                entry.unread += 1;
-            }
-        }
-        if let Some(mailbox_id) = row.mailbox_id {
-            let entry = mailboxes.entry(mailbox_id).or_insert(MailboxCount {
-                mailbox_id,
-                total: 0,
-                unread: 0,
-            });
-            entry.total += 1;
-            if unread {
-                entry.unread += 1;
-            }
-        }
-    }
-
-    // Custom folders are counted by their folder id.
+    // A custom folder is counted under its own id; a system folder under its
+    // name. Starred is a view over the flags, so it comes from its own count.
     let mut custom_folders: std::collections::BTreeMap<String, FolderCount> =
         std::collections::BTreeMap::new();
-    for (row, flag) in &items {
-        let folder = folder_of(row, flag.as_ref());
-        if SYSTEM_FOLDERS.iter().any(|(id, _)| *id == folder) {
-            continue;
-        }
-        let entry = custom_folders.entry(folder).or_insert(FolderCount {
-            total: 0,
-            unread: 0,
-        });
-        entry.total += 1;
-        if !flag.as_ref().map(|flag| flag.read).unwrap_or(false) {
-            entry.unread += 1;
+    for (folder, (total, unread)) in &counts.folders {
+        let entry = FolderCount {
+            total: *total,
+            unread: *unread,
+        };
+        if folders.contains_key(folder) {
+            folders.insert(folder.clone(), entry);
+        } else {
+            custom_folders.insert(folder.clone(), entry);
         }
     }
+    folders.insert(
+        "starred".to_string(),
+        FolderCount {
+            total: counts.starred.0,
+            unread: counts.starred.1,
+        },
+    );
+
+    let mailboxes: Vec<MailboxCount> = counts
+        .mailboxes
+        .iter()
+        .map(|(mailbox_id, (total, unread))| MailboxCount {
+            mailbox_id: *mailbox_id,
+            total: *total,
+            unread: *unread,
+        })
+        .collect();
 
     Ok(Json(DataResponse {
         data: CountsResponse {
             folders,
             custom_folders,
-            mailboxes: mailboxes.into_values().collect(),
+            mailboxes,
         },
     })
     .into_response())
@@ -1831,14 +1882,13 @@ pub async fn message_navigation(
     principal: Principal,
     Query(query): Query<MessageQuery>,
 ) -> Result<Response, ApiError> {
+    let filters = query.filters(&state, principal.mailbox_scope()).await?;
     let entries: Vec<NavigationEntry> =
-        filtered_messages(&state, &query, principal.mailbox_scope())
-            .await?
+        query::navigation(&state.db, &filters, query::NAVIGATION_CAP)
+            .await
+            .map_err(db_error)?
             .into_iter()
-            .map(|(row, flag)| NavigationEntry {
-                id: row.id,
-                unread: !flag.as_ref().map(|flag| flag.read).unwrap_or(false),
-            })
+            .map(|(id, unread)| NavigationEntry { id, unread })
             .collect();
     Ok(Json(DataResponse { data: entries }).into_response())
 }
@@ -1864,27 +1914,26 @@ pub async fn get_message_thread(
         .ok_or_else(|| not_found("Unknown message"))?;
     ensure_scope(&principal, target.mailbox_id, "Unknown message")?;
 
-    let rows = match target.mailbox_id {
-        Some(mailbox_id) => message::Entity::find()
-            .filter(message::Column::MailboxId.eq(mailbox_id))
-            .order_by_asc(message::Column::ReceivedAt)
-            .limit(2000)
-            .all(&state.db)
+    let root = thread_root_for(&state, &target).await?;
+    // Only the conversation's candidates are read, and the References match is
+    // a substring, so membership is re-checked before anything is returned.
+    let members: Vec<message::Model> = match target.mailbox_id {
+        Some(mailbox_id) => repo::thread_candidates(&state.db, mailbox_id, &root)
             .await
-            .map_err(db_error)?,
+            .map_err(db_error)?
+            .into_iter()
+            .filter(|row| in_thread(row, &root))
+            .collect(),
         None => vec![target.clone()],
     };
-    let root = thread_root(&target, &rows);
-    let members: Vec<message::Model> = rows
-        .into_iter()
-        .filter(|row| in_thread(row, &root))
-        .collect();
 
     let ids: Vec<Uuid> = members.iter().map(|row| row.id).collect();
     let flags = load_flags(&state, &ids).await?;
+    let mut extras = message_extras(&state, &ids).await?;
 
     let mut messages = Vec::with_capacity(members.len());
     for row in members {
+        let id = row.id;
         let flag = flags.iter().find(|flag| flag.message_id == row.id);
         let raw = state.store.get(&row.storage_key).await.map_err(internal)?;
         let parsed = body::extract(&raw);
@@ -1900,7 +1949,7 @@ pub async fn get_message_thread(
             })
             .collect();
         messages.push(ThreadMessageResponse {
-            message: MessageResponse::with_flags(row, flag),
+            message: MessageResponse::with_flags(row, flag, extras.remove(&id).unwrap_or_default()),
             text: parsed.text,
             html: parsed.html,
             attachments,
@@ -1940,9 +1989,15 @@ pub async fn empty_folder(
         ..MessageQuery::default()
     };
 
-    let items = filtered_messages(&state, &query, principal.mailbox_scope()).await?;
+    let filters = query.filters(&state, principal.mailbox_scope()).await?;
+    let ids = query::message_ids(&state.db, &filters, query::NAVIGATION_CAP)
+        .await
+        .map_err(db_error)?;
     let mut deleted = 0usize;
-    for (row, _) in &items {
+    for id in ids {
+        let Some(row) = repo::get_message(&state.db, id).await.map_err(db_error)? else {
+            continue;
+        };
         repo::delete_message(&state.db, row.id)
             .await
             .map_err(db_error)?;
@@ -3347,7 +3402,11 @@ pub async fn cancel_scheduled_send(
 
     let flag = upsert_flag(&state, id, None, None, Some("drafts".to_string())).await?;
     Ok(Json(DataResponse {
-        data: MessageResponse::with_flags(message, Some(&flag)),
+        data: MessageResponse::with_flags(
+            message,
+            Some(&flag),
+            message_extras_for(&state, id).await?,
+        ),
     })
     .into_response())
 }
@@ -3722,6 +3781,8 @@ pub async fn send(
     let scheduled_at = body.scheduled_at.filter(|at| *at > chrono::Utc::now());
     let mut stored = 0usize;
     let mut scheduled_copy = None;
+    // The copy the sender owns, so the queued job can report its state back.
+    let mut copy_message_id = None;
 
     // The sender's own copy: it is what its Sent folder shows, and the copy a
     // scheduled send moves to Sent once the relay accepts it.
@@ -3740,6 +3801,7 @@ pub async fn send(
         )
         .await
         .map_err(internal)?;
+        copy_message_id = Some(message_id);
         if scheduled_at.is_some() {
             // It waits in Scheduled until the queue sends it.
             upsert_flag(
@@ -3781,13 +3843,16 @@ pub async fn send(
             &remote,
             &raw,
             scheduled_at,
-            scheduled_copy,
+            delivery::SendCopies {
+                copy_message_id,
+                scheduled_message_id: scheduled_copy,
+            },
         )
         .await
         .map_err(internal)?;
         queued = remote.len();
     } else if !remote.is_empty() {
-        delivery::enqueue_remote(&state, None, &sender, &remote, &raw)
+        delivery::enqueue_remote(&state, None, &sender, &remote, &raw, copy_message_id)
             .await
             .map_err(internal)?;
         queued = remote.len();

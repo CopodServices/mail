@@ -2,11 +2,22 @@ import type { MessageCounts, MessageFolder } from "@/hooks/types";
 import { bulkMessageAction } from "@/lib/api/endpoints";
 import type { BulkMessageAction } from "@/lib/api/types";
 
-export function getFolderNavCount(
+/**
+ * What a folder's badge counts. Unread mail is what a reader has to act on, so
+ * every folder that can hold unread mail shows its unread count. Drafts and
+ * Scheduled are lists of unfinished work, so they show how much is waiting, and
+ * Sent shows nothing: mail the sender owns is never unread.
+ */
+export function getFolderBadgeCount(
 	folder: MessageFolder,
 	counts: MessageCounts["folders"],
 ): number | undefined {
-	return counts[folder].unread;
+	if (folder === "sent") return undefined;
+	const entry = counts[folder];
+	if (!entry) return undefined;
+	return folder === "drafts" || folder === "scheduled"
+		? entry.total
+		: entry.unread;
 }
 
 async function moveMessages(payload: {

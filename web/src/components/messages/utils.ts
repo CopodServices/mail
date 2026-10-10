@@ -12,6 +12,7 @@ import {
 	getEmailDisplayName,
 	splitEmailAddressList,
 } from "@/lib/email/address";
+import type { TranslationKey } from "@/lib/i18n/types";
 import { defaultTranslator, type Translator } from "@/lib/i18n/utils";
 import {
 	formatUserDate,
@@ -30,8 +31,8 @@ export function getMessageParty(
 	currentAccountName?: string,
 	t: Translator = defaultTranslator,
 ) {
-	if (folder === "drafts") return t("list.draft");
-	if (folder === "sent" || folder === "scheduled")
+	// A draft shows who it is going to, exactly like Sent and Scheduled.
+	if (folder === "drafts" || folder === "sent" || folder === "scheduled")
 		return formatRecipientSummary(message.toAddr, message.toContactName, t);
 	if (message.direction === "outbound" && currentAccountName)
 		return currentAccountName;
@@ -71,6 +72,23 @@ export function isMessageListRowUnread(message: Message): boolean {
 	return message.direction === "inbound" && !message.read;
 }
 
+/**
+ * The label for a delivery the client can still act on. A queued, sending or
+ * failed copy says so; a delivered one needs no label.
+ */
+export function getSendStateKey(state?: string | null): TranslationKey | null {
+	switch (state) {
+		case "queued":
+			return "list.sendQueued";
+		case "sending":
+			return "list.sendSending";
+		case "failed":
+			return "list.sendFailed";
+		default:
+			return null;
+	}
+}
+
 export function getMessagePreview(
 	message: Message,
 	folder: MessageFolderConfig["folder"],
@@ -97,15 +115,17 @@ export function formatMessageListTimestamp(createdAt: string): string {
 }
 
 export function getPageRange(
-	offset: number,
+	pageIndex: number,
+	limit: number,
 	count: number,
 	total: number,
 ): PageRange {
 	if (total === 0 || count === 0) return { start: 0, end: 0, total };
 
+	const start = pageIndex * limit + 1;
 	return {
-		start: offset + 1,
-		end: Math.min(offset + count, total),
+		start,
+		end: Math.min(start + count - 1, total),
 		total,
 	};
 }

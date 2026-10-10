@@ -76,7 +76,8 @@ export async function unsnoozeMessage(messageId: string) {
 
 export async function toggleMessageStar(messageId: string, starred: boolean) {
 	const value = await setMessageStarred(messageId, starred);
-	window.dispatchEvent(new Event("copod:message-counts-changed"));
+	// A star changes the Starred list as well as its count, so both caches drop.
+	window.dispatchEvent(new Event("copod:messages-changed"));
 	return value;
 }
 

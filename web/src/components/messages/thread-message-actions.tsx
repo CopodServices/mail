@@ -45,7 +45,7 @@ export function ThreadMessageActions({
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const canReplyAll = hasAdditionalRecipients(message, ownAddresses);
-	const moveActions = getMoveMessageActions(message.status, message.direction);
+	const moveActions = getMoveMessageActions(message.folder, message.direction);
 	const replyFromAddress =
 		ownAddresses.length > 0
 			? getOwnAddressForMessage(message, ownAddresses)

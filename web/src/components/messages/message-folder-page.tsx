@@ -8,6 +8,7 @@ import {
 	ListFilter,
 	Mail,
 	MailOpen,
+	Star,
 	Trash2,
 } from "lucide-react";
 import Link from "next/link";
@@ -45,6 +46,7 @@ import {
 	MessageNavigationProgress,
 	useMessageNavigation,
 } from "./message-navigation";
+import { MessageStateChips } from "./message-state-chips";
 import { formatScheduledSendTime } from "./scheduled-send-utils";
 import { SwipeableRow } from "./swipeable-row";
 import type {
@@ -80,7 +82,6 @@ function MessageListRow({
 	dragMessageIds,
 }: MessageListRowProps) {
 	const { t } = useLanguage();
-	const Icon = config.icon;
 	const [read, setRead] = useState(message.read);
 	const [threadUnread, setThreadUnread] = useState(message.threadUnread);
 	const [starred, setStarred] = useState(message.starred);
@@ -92,8 +93,9 @@ function MessageListRow({
 	useEffect(() => setStarred(message.starred), [message.starred]);
 	const rowMessage = { ...message, read, starred, threadUnread };
 	const unread = isMessageListRowUnread(rowMessage);
-	const draggable =
-		config.folder === "inbox" && message.direction === "inbound";
+	// A custom folder is not the Inbox, whatever folder name it borrows.
+	const inInbox = !config.folderId && config.folder === "inbox";
+	const draggable = inInbox && message.direction === "inbound";
 	const party = getMessageParty(
 		rowMessage,
 		config.folder,
@@ -116,7 +118,10 @@ function MessageListRow({
 			if (action === "unread") setThreadUnread(message.threadMessageIds.length);
 		}
 		if (unreadDelta)
-			dispatchMessageCountsDelta({ inboxUnreadDelta: unreadDelta });
+			dispatchMessageCountsDelta({
+				folder: config.folderId ?? config.folder,
+				unreadDelta,
+			});
 		try {
 			await onMessageAction(message.id, action);
 		} catch (error) {
@@ -124,7 +129,10 @@ function MessageListRow({
 				setRead(previousRead);
 				setThreadUnread(previousThreadUnread);
 				if (unreadDelta)
-					dispatchMessageCountsDelta({ inboxUnreadDelta: -unreadDelta });
+					dispatchMessageCountsDelta({
+						folder: config.folderId ?? config.folder,
+						unreadDelta: -unreadDelta,
+					});
 			}
 			throw error;
 		}
@@ -132,7 +140,7 @@ function MessageListRow({
 
 	const swipeable =
 		compact &&
-		(config.folder === "inbox" || config.folder === "snoozed") &&
+		(inInbox || config.folder === "snoozed") &&
 		message.direction === "inbound";
 
 	function onMessageNavigate(event: MouseEvent<HTMLAnchorElement>) {
@@ -149,12 +157,18 @@ function MessageListRow({
 			if (previousThreadUnread !== undefined)
 				setThreadUnread(Math.max(0, previousThreadUnread - 1));
 			if (message.direction === "inbound")
-				dispatchMessageCountsDelta({ inboxUnreadDelta: -1 });
+				dispatchMessageCountsDelta({
+					folder: config.folderId ?? config.folder,
+					unreadDelta: -1,
+				});
 			void runBulkMessageAction([message.id], "read", false).catch(() => {
 				setRead(false);
 				setThreadUnread(previousThreadUnread);
 				if (message.direction === "inbound")
-					dispatchMessageCountsDelta({ inboxUnreadDelta: 1 });
+					dispatchMessageCountsDelta({
+						folder: config.folderId ?? config.folder,
+						unreadDelta: 1,
+					});
 			});
 		}
 		navigation.onNavigate(event, !read);
@@ -228,6 +242,7 @@ function MessageListRow({
 					<span className="mt-0.5 block truncate text-xs leading-5 text-neutral-500">
 						{preview}
 					</span>
+					<MessageStateChips message={rowMessage} className="mt-1" />
 				</Link>
 			</div>
 		);
@@ -258,30 +273,26 @@ function MessageListRow({
 	} ${draggable ? "cursor-grab active:cursor-grabbing" : ""}`;
 	const content = (
 		<>
-			{config.folder === "inbox" && message.direction === "inbound" && (
-				<Tooltip label={starred ? t("list.starred") : t("list.notStarred")}>
-					<Button
-						type="button"
-						variant="ghost"
-						size="sm"
-						onClick={(event) => {
-							event.preventDefault();
-							event.stopPropagation();
-							void toggleMessageStar(message.id, !starred).then((next) =>
-								setStarred(next),
-							);
-						}}
-						aria-label={starred ? t("list.starred") : t("list.notStarred")}
-					>
-						<Icon
-							className={`h-4 w-4 ${starred ? "fill-amber-400 text-amber-400" : "text-neutral-300"}`}
-						/>
-					</Button>
-				</Tooltip>
-			)}
-			{(config.folder !== "inbox" || message.direction !== "inbound") && (
-				<Icon className="h-4 w-4 text-neutral-300" />
-			)}
+			{/* Starring works everywhere: the state has to be visible in every folder. */}
+			<Tooltip label={starred ? t("list.starred") : t("list.notStarred")}>
+				<Button
+					type="button"
+					variant="ghost"
+					size="sm"
+					onClick={(event) => {
+						event.preventDefault();
+						event.stopPropagation();
+						void toggleMessageStar(message.id, !starred).then((next) =>
+							setStarred(next),
+						);
+					}}
+					aria-label={starred ? t("list.starred") : t("list.notStarred")}
+				>
+					<Star
+						className={`h-4 w-4 ${starred ? "fill-amber-400 text-amber-400" : "text-neutral-300"}`}
+					/>
+				</Button>
+			</Tooltip>
 			<span
 				className={clsx(
 					unread && "font-semibold",
@@ -305,16 +316,19 @@ function MessageListRow({
 					- {getMessagePreview(rowMessage, config.folder, t)}
 				</span>
 			</span>
-			<time
-				dateTime={message.createdAt}
-				className={`min-w-[96px] whitespace-nowrap text-right text-xs group-hover:opacity-0 ${
-					unread ? "font-semibold text-neutral-800" : "text-neutral-500"
-				}`}
-			>
-				{message.scheduledAt
-					? formatScheduledSendTime(message.scheduledAt, t)
-					: formatMessageListTimestamp(message.createdAt)}
-			</time>
+			<span className="flex min-w-[96px] flex-col items-end gap-1">
+				<time
+					dateTime={message.createdAt}
+					className={`whitespace-nowrap text-right text-xs group-hover:opacity-0 ${
+						unread ? "font-semibold text-neutral-800" : "text-neutral-500"
+					}`}
+				>
+					{message.scheduledAt
+						? formatScheduledSendTime(message.scheduledAt, t)
+						: formatMessageListTimestamp(message.createdAt)}
+				</time>
+				<MessageStateChips message={rowMessage} />
+			</span>
 		</>
 	);
 
@@ -355,7 +369,7 @@ function MessageListRow({
 			<Link href={href} onClick={onMessageNavigate} className="contents">
 				{content}
 			</Link>
-			{(config.folder === "inbox" || config.folder === "snoozed") &&
+			{(inInbox || config.folder === "snoozed") &&
 				message.direction === "inbound" && (
 					<MessageListRowActions message={rowMessage} onAction={runRowAction} />
 				)}
@@ -374,7 +388,6 @@ export function MessageFolderPage({
 	const { selectedMailbox, isLoading: mailboxesLoading } = useSelectedMailbox();
 	const { query } = useMailSearch();
 	const isMobile = useIsMobile();
-	const [offset, setOffset] = useState(0);
 	const [internalSelectedMessages, setInternalSelectedMessages] = useState<
 		Array<{ id: string; read: boolean }>
 	>([]);
@@ -383,13 +396,23 @@ export function MessageFolderPage({
 	const [unreadOnly, setUnreadOnly] = useState(false);
 	const [conversationView] = useConversationView();
 	const grouped = conversationView && config.folder !== "drafts";
-	const { messages, isLoading, total, limit, updateMessages } = useMessages(
+	const {
+		messages,
+		isLoading,
+		total,
+		limit,
+		pageIndex,
+		hasNext,
+		hasPrevious,
+		nextPage,
+		previousPage,
+		updateMessages,
+	} = useMessages(
 		config.folder,
 		selectedMailbox?.id,
 		{
 			query,
 			limit: pageSize,
-			offset,
 			read: unreadOnly ? "unread" : "all",
 			group: grouped ? "thread" : undefined,
 		},
@@ -408,7 +431,7 @@ export function MessageFolderPage({
 	const mailboxAddress = getMailboxAddress(selectedMailbox);
 	const currentAccountName =
 		selectedMailbox?.displayName ?? selectedMailbox?.localPart;
-	const pageRange = getPageRange(offset, messages.length, total);
+	const pageRange = getPageRange(pageIndex, limit, messages.length, total);
 	const selectedMessages =
 		selection?.selectedMessages ?? internalSelectedMessages;
 	const setSelectedMessages =
@@ -433,7 +456,6 @@ export function MessageFolderPage({
 		);
 
 	useEffect(() => {
-		setOffset(0);
 		setSelectedMessages([]);
 	}, [
 		query,
@@ -446,7 +468,7 @@ export function MessageFolderPage({
 
 	useEffect(() => {
 		setSelectedMessages([]);
-	}, [offset]);
+	}, [pageIndex]);
 
 	useEffect(() => {
 		if (mailboxesLoading) return;
@@ -514,7 +536,6 @@ export function MessageFolderPage({
 		setEmptyingFolder(true);
 		try {
 			await emptyMessageFolder(selectedMailbox.id, permanentDeleteFolder);
-			setOffset(0);
 		} catch (error) {
 			console.error(error);
 			window.alert(
@@ -559,7 +580,7 @@ export function MessageFolderPage({
 			setSelectedMessages((current) =>
 				current.map((message) => ({ ...message, read: readValue })),
 			);
-			const inboxUnreadDelta = changedMessages
+			const unreadDelta = changedMessages
 				.filter((message) => message.direction === "inbound")
 				.reduce(
 					(total, message) =>
@@ -567,7 +588,11 @@ export function MessageFolderPage({
 						(readValue ? (message.read ? 0 : -1) : message.read ? 1 : 0),
 					0,
 				);
-			if (inboxUnreadDelta) dispatchMessageCountsDelta({ inboxUnreadDelta });
+			if (unreadDelta)
+				dispatchMessageCountsDelta({
+					folder: config.folderId ?? config.folder,
+					unreadDelta,
+				});
 		}
 		try {
 			await runBulkMessageAction(
@@ -580,7 +605,7 @@ export function MessageFolderPage({
 		} catch (error) {
 			if (readValue !== null) {
 				updateMessages(previousMessages);
-				const inboxUnreadDelta = changedMessages
+				const unreadDelta = changedMessages
 					.filter((message) => message.direction === "inbound")
 					.reduce(
 						(total, message) =>
@@ -588,7 +613,11 @@ export function MessageFolderPage({
 							(readValue ? (message.read ? 0 : 1) : message.read ? -1 : 0),
 						0,
 					);
-				if (inboxUnreadDelta) dispatchMessageCountsDelta({ inboxUnreadDelta });
+				if (unreadDelta)
+					dispatchMessageCountsDelta({
+						folder: config.folderId ?? config.folder,
+						unreadDelta,
+					});
 			}
 			throw error;
 		} finally {
@@ -641,8 +670,8 @@ export function MessageFolderPage({
 							<Button
 								variant="ghost"
 								size="sm"
-								disabled={offset === 0 || isLoading}
-								onClick={() => setOffset(Math.max(offset - limit, 0))}
+								disabled={!hasPrevious || isLoading}
+								onClick={previousPage}
 								aria-label={t("list.previousPage")}
 							>
 								<ChevronLeft className="h-4 w-4" />
@@ -652,8 +681,8 @@ export function MessageFolderPage({
 							<Button
 								variant="ghost"
 								size="sm"
-								disabled={offset + messages.length >= total || isLoading}
-								onClick={() => setOffset(offset + limit)}
+								disabled={!hasNext || isLoading}
+								onClick={nextPage}
 								aria-label={t("list.nextPage")}
 							>
 								<ChevronRight className="h-4 w-4" />

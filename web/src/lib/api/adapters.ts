@@ -29,11 +29,14 @@ type ApiMessage = {
 	starred: boolean;
 	folder: string;
 	snoozed_until?: string | null;
+	scheduled_at?: string | null;
+	send_state?: string | null;
+	send_error?: string | null;
 };
 
 type ApiMessageList = {
 	data?: ApiMessage[];
-	meta?: { total?: number; limit?: number; offset?: number };
+	meta?: { total?: number; limit?: number; next_cursor?: string | null };
 };
 
 type ApiCounts = {
@@ -62,21 +65,27 @@ type ApiMessageDetail = {
 };
 
 function toMessage(dto: ApiMessage): Message {
+	const folder = dto.folder as MessageFolder;
 	return {
 		id: dto.id,
 		userId: dto.mailbox_id ?? "",
 		mailboxId: dto.mailbox_id,
-		folderId: null,
+		folderId: isSystemFolder(folder) ? null : folder,
 		direction: dto.direction,
 		providerMessageId: dto.message_id,
 		fromAddr: dto.header_from ?? dto.envelope_from,
 		toAddr: dto.envelope_to,
 		subject: dto.subject,
 		snippet: null,
-		status: dto.folder,
-		read: dto.read,
+		status: dto.status,
+		folder,
+		// A copy in the sender's own Sent folder is read by definition.
+		read: dto.read || dto.direction === "outbound",
 		starred: dto.starred,
 		snoozedUntil: dto.snoozed_until ?? null,
+		scheduledAt: dto.scheduled_at ?? null,
+		sendState: (dto.send_state as Message["sendState"]) ?? null,
+		sendError: dto.send_error ?? null,
 		threadId: dto.message_id,
 		createdAt: dto.received_at,
 		threadCount: 1,
@@ -89,11 +98,12 @@ export function adaptMessageList(payload: ApiMessageList): MessageListResponse {
 		messages: (payload.data ?? []).map(toMessage),
 		total: payload.meta?.total ?? payload.data?.length ?? 0,
 		limit: payload.meta?.limit ?? payload.data?.length ?? 0,
-		offset: payload.meta?.offset ?? 0,
+		nextCursor: payload.meta?.next_cursor ?? null,
 	};
 }
 
-const EMPTY_FOLDER_COUNTS: MessageFolder[] = [
+/** The folders every mailbox has, which are not custom folder ids. */
+export const SYSTEM_FOLDERS: MessageFolder[] = [
 	"inbox",
 	"starred",
 	"snoozed",
@@ -105,9 +115,13 @@ const EMPTY_FOLDER_COUNTS: MessageFolder[] = [
 	"spam",
 ];
 
+export function isSystemFolder(folder: string): folder is MessageFolder {
+	return (SYSTEM_FOLDERS as string[]).includes(folder);
+}
+
 export function adaptCounts(payload: ApiCounts): MessageCounts {
 	const folders = {} as Record<MessageFolder, FolderCount>;
-	for (const folder of EMPTY_FOLDER_COUNTS) {
+	for (const folder of SYSTEM_FOLDERS) {
 		folders[folder] = { total: 0, unread: 0 };
 	}
 	for (const [folder, count] of Object.entries(payload.data?.folders ?? {})) {

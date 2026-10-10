@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import type { MessageCounts, MessageCountsDelta } from "./types";
-import { clearMessageCountsCache, fetchMessageCounts } from "./utils";
+import {
+	applyMessageCountsDelta,
+	clearMessageCountsCache,
+	fetchMessageCounts,
+} from "./utils";
 
 const REFRESH_DEBOUNCE_MS = 150;
 
@@ -58,20 +62,8 @@ export function useMessageCounts(mailboxId?: string | null, enabled = true) {
 		}
 		function onMessageCountsDelta(event: Event) {
 			const detail = (event as CustomEvent<MessageCountsDelta>).detail;
-			if (!detail?.inboxUnreadDelta) return;
-			setCounts((current) => ({
-				...current,
-				folders: {
-					...current.folders,
-					inbox: {
-						...current.folders.inbox,
-						unread: Math.max(
-							0,
-							current.folders.inbox.unread + detail.inboxUnreadDelta,
-						),
-					},
-				},
-			}));
+			if (!detail) return;
+			setCounts((current) => applyMessageCountsDelta(current, detail));
 		}
 		window.addEventListener("copod:messages-changed", onMessagesChanged);
 		window.addEventListener("copod:message-counts-changed", onMessagesChanged);

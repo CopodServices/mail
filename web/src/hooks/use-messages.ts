@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Message, MessageFilterOptions, MessageFolder } from "./types";
 import {
 	clearMessageCountsCache,
@@ -9,6 +9,11 @@ import {
 
 const REFRESH_DEBOUNCE_MS = 150;
 
+/**
+ * One folder's messages, paged with the API's keyset cursor. The hook keeps the
+ * cursors of the pages already visited, so Previous walks back through what was
+ * read and Next follows the cursor the last page returned.
+ */
 export function useMessages(
 	folder: MessageFolder,
 	mailboxId?: string | null,
@@ -20,11 +25,27 @@ export function useMessages(
 	const [isLoading, setIsLoading] = useState(true);
 	const [total, setTotal] = useState(0);
 	const [limit, setLimit] = useState(filters?.limit ?? 25);
-	const [offset, setOffset] = useState(filters?.offset ?? 0);
+	// The cursor each visited page was opened with; the first page has none.
+	const [cursors, setCursors] = useState<Array<string | null>>([null]);
+	const [nextCursor, setNextCursor] = useState<string | null>(null);
 
-	const unreadCount = messages.filter(
-		(m) => m.direction === "inbound" && !m.read,
-	).length;
+	// Anything but the cursor identifies the list: a change to it starts over.
+	const listKey = useMemo(
+		() =>
+			getMessageQueryParams(
+				folder,
+				mailboxId,
+				{ ...filters, cursor: null },
+				folderId,
+			).toString(),
+		[folder, mailboxId, folderId, filters],
+	);
+	const cursor = cursors[cursors.length - 1] ?? null;
+
+	useEffect(() => {
+		setCursors([null]);
+		setNextCursor(null);
+	}, [listKey]);
 
 	useEffect(() => {
 		if (!enabled) return;
@@ -38,7 +59,7 @@ export function useMessages(
 				const params = getMessageQueryParams(
 					folder,
 					mailboxId,
-					filters,
+					{ ...filters, cursor },
 					folderId,
 				);
 				const data = await fetchMessageList(params, force);
@@ -46,7 +67,7 @@ export function useMessages(
 					setMessages(data.messages ?? []);
 					setTotal(data.total ?? 0);
 					setLimit(data.limit ?? filters?.limit ?? 25);
-					setOffset(data.offset ?? filters?.offset ?? 0);
+					setNextCursor(data.nextCursor ?? null);
 				}
 			} finally {
 				if (!cancelled && currentRequest === requestNumber) setIsLoading(false);
@@ -71,18 +92,11 @@ export function useMessages(
 			window.removeEventListener("copod:messages-changed", onMessagesChanged);
 			if (refreshTimer) window.clearTimeout(refreshTimer);
 		};
-	}, [
-		enabled,
-		filters?.group,
-		filters?.limit,
-		filters?.offset,
-		filters?.query,
-		filters?.read,
-		filters?.title,
-		folder,
-		folderId,
-		mailboxId,
-	]);
+	}, [enabled, listKey, cursor]);
+
+	const unreadCount = messages.filter(
+		(message) => message.direction === "inbound" && !message.read,
+	).length;
 
 	return {
 		messages,
@@ -90,7 +104,18 @@ export function useMessages(
 		isLoading,
 		total,
 		limit,
-		offset,
+		/** Zero-based index of the page on screen, for the range label. */
+		pageIndex: cursors.length - 1,
+		hasNext: nextCursor !== null,
+		hasPrevious: cursors.length > 1,
+		nextPage: () => {
+			if (nextCursor) setCursors((current) => [...current, nextCursor]);
+		},
+		previousPage: () => {
+			setCursors((current) =>
+				current.length > 1 ? current.slice(0, -1) : current,
+			);
+		},
 		updateMessages: setMessages,
 	};
 }

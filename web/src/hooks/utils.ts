@@ -1,9 +1,14 @@
-import { adaptCounts, adaptMessageList } from "@/lib/api/adapters";
+import {
+	adaptCounts,
+	adaptMessageList,
+	SYSTEM_FOLDERS,
+} from "@/lib/api/adapters";
 import { apiFetch } from "@/lib/api/client";
 import { setCachedMessageRead } from "@/lib/messages/detail-cache";
 import { parseSearchQuery } from "@/lib/search/query-utils";
 import type {
 	MessageCounts,
+	MessageCountsDelta,
 	MessageFilterOptions,
 	MessageFolder,
 	MessageListResponse,
@@ -53,7 +58,7 @@ export function getMessageQueryParams(
 	if (parsedFilters?.read && parsedFilters.read !== "all")
 		params.set("read", parsedFilters.read);
 	if (filters?.limit) params.set("limit", String(filters.limit));
-	if (filters?.offset) params.set("offset", String(filters.offset));
+	if (filters?.cursor) params.set("cursor", filters.cursor);
 
 	return params;
 }
@@ -72,6 +77,45 @@ export function clearMessageCountsCache() {
 	messageCountsGeneration += 1;
 	messageCountsCache.clear();
 	messageCountsRequests.clear();
+}
+
+/**
+ * Fold an optimistic unread change into the counts for the folder it happened
+ * in. Only that folder moves, so reading a message in Spam, Trash, Archived,
+ * Snoozed or a custom folder never touches the Inbox badge.
+ */
+export function applyMessageCountsDelta(
+	counts: MessageCounts,
+	delta: MessageCountsDelta,
+): MessageCounts {
+	if (!delta.unreadDelta) return counts;
+	if (SYSTEM_FOLDERS.includes(delta.folder as MessageFolder)) {
+		const folder = delta.folder as MessageFolder;
+		const current = counts.folders[folder];
+		if (!current) return counts;
+		return {
+			...counts,
+			folders: {
+				...counts.folders,
+				[folder]: {
+					...current,
+					unread: Math.max(0, current.unread + delta.unreadDelta),
+				},
+			},
+		};
+	}
+	const current = counts.customFolders[delta.folder];
+	if (!current) return counts;
+	return {
+		...counts,
+		customFolders: {
+			...counts.customFolders,
+			[delta.folder]: {
+				...current,
+				unread: Math.max(0, current.unread + delta.unreadDelta),
+			},
+		},
+	};
 }
 
 export function clearMessageListCache() {

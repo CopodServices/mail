@@ -60,7 +60,7 @@ The client's whole reading path is served by the API today:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | /api/messages | List mail. Filters: mailbox, mailbox_id, folder, direction, q, read, starred, limit, offset |
+| GET | /api/messages | List mail. Filters: mailbox, mailbox_id, folder, direction, q, read, starred, limit, cursor |
 | GET | /api/messages/counts | Folder and mailbox totals plus unread counts, including custom folders |
 | GET | /api/messages/{id} | Message with body (text/html) and attachment list |
 | GET | /api/messages/{id}/raw | Raw RFC5322 message |
@@ -95,6 +95,13 @@ returns to its folder on its own. The message row
 itself is never mutated. Threading uses the In-Reply-To and References headers,
 captured at intake into the message row.
 
+Only mail that arrived can be unread: the copy kept in the sender's own Sent
+folder reports its delivery state instead (send_state and send_error, from the
+queued job that carries it, and scheduled_at while it waits). A message without
+a reader flag is classified by its direction and delivery status, and the list,
+the counts and the reading order all classify that way in SQL, so a folder's
+badge always matches the rows it opens.
+
 Client preferences are one settings row per mailbox (keyed by the mailbox
 address), and templates are a small table the composer lists and fills from.
 
@@ -109,10 +116,14 @@ when its time arrives: it is queued with that time as its next attempt, and the
 worker moves the copy to Sent once the relay accepts it. On the same origin the
 container proxies the WebSocket upgrade through.
 
+The message list is keyset-paged, newest first: pass the cursor a page returned
+in meta.next_cursor to read on, and the page after it starts strictly after the
+last row it saw, so a message arriving mid-walk cannot repeat or skip a row.
+
 ## Response shapes
 
 Single objects are wrapped as {"data": ...}; collections add
-{"meta": {"total", "limit", "offset"}}. Fields are snake_case. The client
-translates these into its own model in web/src/lib/mail-api/adapters.ts and
-sends its writes through web/src/lib/mail-api/client.ts, so the API stays the
+{"meta": {"total", "limit", "next_cursor"}}. Fields are snake_case. The client
+translates these into its own model in web/src/lib/api/adapters.ts and
+sends its writes through web/src/lib/api/client.ts, so the API stays the
 single source of truth for shapes.

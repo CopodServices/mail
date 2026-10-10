@@ -165,7 +165,16 @@ describe.skipIf(!base)("the web client against the live API", () => {
 			expect(
 				message.direction === "inbound" || message.direction === "outbound",
 			).toBe(true);
+			expect(typeof message.folder).toBe("string");
+			expect(
+				message.folderId === null || typeof message.folderId === "string",
+			).toBe(true);
 		}
+		expect(
+			list.nextCursor === null ||
+				list.nextCursor === undefined ||
+				typeof list.nextCursor === "string",
+		).toBe(true);
 
 		const counts = adapters.adaptCounts(
 			await readJson("/api/messages/counts?mailbox_id=" + mailboxId),
@@ -187,5 +196,38 @@ describe.skipIf(!base)("the web client against the live API", () => {
 			expect(typeof folder.total).toBe("number");
 			expect(typeof folder.unread).toBe("number");
 		}
+	});
+
+	test("pages the list with the cursor a page returned", async () => {
+		const { getMessageQueryParams, fetchMessageList } = await import(
+			"@/hooks/utils"
+		);
+		const first = await fetchMessageList(
+			getMessageQueryParams("inbox", mailboxId, { limit: 1 }),
+			true,
+		);
+		expect((first.messages ?? []).length).toBeLessThanOrEqual(1);
+		if (first.nextCursor) {
+			const second = await fetchMessageList(
+				getMessageQueryParams("inbox", mailboxId, {
+					limit: 1,
+					cursor: first.nextCursor,
+				}),
+				true,
+			);
+			expect(second.messages?.[0]?.id).not.toBe(first.messages?.[0]?.id);
+			// The resume point is a value, so the page after it excludes it.
+			expect(
+				(second.messages ?? []).some(
+					(message) => message.id === first.messages?.[0]?.id,
+				),
+			).toBe(false);
+		}
+
+		// A cursor the API did not write is refused rather than guessed at.
+		const refused = await fetch(
+			(base ?? "") + "/api/messages?limit=1&cursor=nope",
+		);
+		expect(refused.status).toBe(400);
 	});
 });

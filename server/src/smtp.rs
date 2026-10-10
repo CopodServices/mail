@@ -437,11 +437,13 @@ impl Session {
         }
 
         let mut failed = false;
+        // The copy this submission owns, so its row can report the job state.
+        let mut copy_message_id = None;
 
         // A submission keeps the sender's own copy: that is what its Sent folder
         // shows. Inbound mail has no local sender to file a copy for.
-        if let (Mode::Submission, Some(sender)) = (self.mode, self.authenticated.as_ref())
-            && let Err(err) = delivery::store_local(
+        if let (Mode::Submission, Some(sender)) = (self.mode, self.authenticated.as_ref()) {
+            match delivery::store_local(
                 &self.state,
                 sender,
                 message::Direction::Outbound,
@@ -451,9 +453,13 @@ impl Session {
                 &outcome,
             )
             .await
-        {
-            warn!(error = %err, "failed to store the sender's copy");
-            failed = true;
+            {
+                Ok(id) => copy_message_id = Some(id),
+                Err(err) => {
+                    warn!(error = %err, "failed to store the sender's copy");
+                    failed = true;
+                }
+            }
         }
 
         // Either way a local recipient gets it in its inbox.
@@ -476,9 +482,15 @@ impl Session {
 
         if !remote.is_empty() {
             let mailbox_id = self.authenticated.as_ref().map(|mailbox| mailbox.id);
-            if let Err(err) =
-                delivery::enqueue_remote(&self.state, mailbox_id, &envelope_from, &remote, &raw)
-                    .await
+            if let Err(err) = delivery::enqueue_remote(
+                &self.state,
+                mailbox_id,
+                &envelope_from,
+                &remote,
+                &raw,
+                copy_message_id,
+            )
+            .await
             {
                 warn!(error = %err, "failed to queue an outbound message");
                 failed = true;

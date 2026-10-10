@@ -32,12 +32,12 @@ import type {
 
 export function getMessageBackHref(
 	direction: "inbound" | "outbound",
-	status: string,
+	folder: string,
 ) {
-	if (status === "trash") return "/trash";
-	if (status === "spam") return "/spam";
-	if (status === "archived") return "/archived";
-	if (status === "draft") return "/drafts";
+	if (folder === "trash") return "/trash";
+	if (folder === "spam") return "/spam";
+	if (folder === "archived") return "/archived";
+	if (folder === "drafts") return "/drafts";
 	return direction === "inbound" ? "/inbox" : "/sent";
 }
 
@@ -65,24 +65,24 @@ export function confirmTrashWithoutUnsubscribe() {
 }
 
 export function getMoveMessageActions(
-	status: string,
+	folder: string,
 	direction: "inbound" | "outbound",
 ): MoveMessageActionItem[] {
 	const actions: MoveMessageActionItem[] = [];
-	if ((status === "archived" || status === "spam") && direction === "inbound") {
+	if ((folder === "archived" || folder === "spam") && direction === "inbound") {
 		actions.push({
 			action: "inbox",
-			labelKey: status === "spam" ? "common.notSpam" : "navigation.inbox",
+			labelKey: folder === "spam" ? "common.notSpam" : "navigation.inbox",
 			icon: InboxIcon,
 		});
 	}
-	if (status !== "archived")
+	if (folder !== "archived")
 		actions.push({
 			action: "archive",
 			labelKey: "navigation.archived",
 			icon: ArchiveIcon,
 		});
-	if (status !== "spam")
+	if (folder !== "spam")
 		actions.push({
 			action: "spam",
 			labelKey: "navigation.spam",

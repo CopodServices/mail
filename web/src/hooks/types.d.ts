@@ -41,11 +41,16 @@ export type Message = {
 	textBody?: string | null;
 	htmlBody?: string | null;
 	status: MessageStatus | string;
+	/** The folder the message lives in: a system folder or a custom id. */
+	folder: MessageFolder | string;
 	read: boolean;
 	starred: boolean;
 	snoozedUntil?: string | null;
 	/** When a scheduled send will go out; set on rows in the Scheduled list. */
 	scheduledAt?: string | null;
+	/** The state of the job delivering this copy, when one queued it. */
+	sendState?: "queued" | "sending" | "sent" | "failed" | null;
+	sendError?: string | null;
 	threadId: string | null;
 	inReplyTo?: string | null;
 	references?: string | null;
@@ -84,7 +89,8 @@ export type MessageFilterOptions = {
 	read?: MessageReadFilter;
 	title?: string;
 	limit?: number;
-	offset?: number;
+	/** The keyset cursor a previous page returned; absent for the first page. */
+	cursor?: string | null;
 	/** "thread" collapses each conversation to its newest matching message. */
 	group?: "thread";
 };
@@ -93,7 +99,7 @@ export type MessageListResponse = {
 	messages?: Message[];
 	total?: number;
 	limit?: number;
-	offset?: number;
+	nextCursor?: string | null;
 };
 
 export type FolderCount = {
@@ -115,5 +121,7 @@ export type MessageCounts = {
 };
 
 export type MessageCountsDelta = {
-	inboxUnreadDelta?: number;
+	/** The folder the change happened in: a system folder or a custom id. */
+	folder: string;
+	unreadDelta: number;
 };

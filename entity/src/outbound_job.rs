@@ -28,6 +28,9 @@ pub struct Model {
     pub message_id: Option<String>,
     /// The Scheduled-folder copy to move to Sent once the message goes out.
     pub scheduled_message_id: Option<Uuid>,
+    /// The copy this job delivers: the row shown in the sender's Sent folder,
+    /// which reports the job's state.
+    pub copy_message_id: Option<Uuid>,
     pub attempts: i32,
     pub next_attempt_at: chrono::DateTime<Utc>,
     pub status: JobStatus,
