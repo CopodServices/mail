@@ -1,4 +1,26 @@
 use anyhow::{Context, Result};
+use mail_builder::headers::address::Address;
+
+/// The header values the composer was given, as RFC5322 addresses.
+///
+/// A value is a bare address or carries a display name (`"Info" <info@x>`);
+/// mail-builder would take the whole string as one address and wrap it in
+/// another pair of angle brackets, so the name and the address come out first.
+fn to_addresses(values: &[String]) -> Vec<Address<'_>> {
+    values
+        .iter()
+        .map(|value| {
+            let (name, email) = crate::address::split_display_name(value);
+            Address::new_address(name, email)
+        })
+        .collect()
+}
+
+/// One header value as an RFC5322 address, display name kept.
+fn single_address(value: &str) -> Address<'_> {
+    let (name, email) = crate::address::split_display_name(value);
+    Address::new_address(name, email)
+}
 
 /// Builds a simple message (optional text and HTML parts) with mail-builder.
 pub fn simple(
@@ -8,10 +30,9 @@ pub fn simple(
     text: Option<&str>,
     html: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let recipients: Vec<&str> = to.iter().map(String::as_str).collect();
     let mut builder = mail_builder::MessageBuilder::new()
-        .from(from)
-        .to(recipients)
+        .from(single_address(from))
+        .to(to_addresses(to))
         .subject(subject);
 
     if let Some(text) = text {
@@ -50,17 +71,16 @@ pub struct Compose<'a> {
 
 /// Builds a message with recipients, threading headers and attachments.
 pub fn build(message: &Compose<'_>) -> Result<Vec<u8>> {
-    let to: Vec<&str> = message.to.iter().map(String::as_str).collect();
     let mut builder = mail_builder::MessageBuilder::new()
-        .from(message.from)
-        .to(to)
+        .from(single_address(message.from))
+        .to(to_addresses(message.to))
         .subject(message.subject);
 
-    let cc: Vec<&str> = message.cc.iter().map(String::as_str).collect();
+    let cc = to_addresses(message.cc);
     if !cc.is_empty() {
         builder = builder.cc(cc);
     }
-    let bcc: Vec<&str> = message.bcc.iter().map(String::as_str).collect();
+    let bcc = to_addresses(message.bcc);
     if !bcc.is_empty() {
         builder = builder.bcc(bcc);
     }
@@ -95,6 +115,36 @@ pub fn build(message: &Compose<'_>) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_a_display_name_in_the_from_header() {
+        let raw = build(&Compose {
+            from: "\"Info\" <info@example.test>",
+            to: &["bob@example.test".to_string()],
+            cc: &[],
+            bcc: &[],
+            subject: "Hello",
+            text: Some("body"),
+            html: None,
+            attachments: &[],
+            message_id: None,
+            in_reply_to: None,
+            references: None,
+        })
+        .unwrap();
+        let text = String::from_utf8_lossy(&raw).to_string();
+        // The name must be a name, not part of an angle-bracketed address.
+        assert!(!text.contains("<<"), "{text}");
+        assert!(
+            text.contains("From: \"Info\" <info@example.test>"),
+            "{text}"
+        );
+        assert_eq!(
+            crate::meta::extract(&raw).header_from.as_deref(),
+            Some("info@example.test"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn builds_a_message_with_a_subject_and_body() {

@@ -42,6 +42,25 @@ pub fn domain_or(input: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// Splits a header value into its display name and its address.
+///
+/// A mail client sends `"Info" <info@example.com>` or a bare address; the two
+/// parts belong in different places, because a name written as part of the
+/// address is not what a header wants.
+pub fn split_display_name(value: &str) -> (Option<&str>, &str) {
+    let trimmed = value.trim();
+    if let (Some(start), Some(end)) = (trimmed.find('<'), trimmed.rfind('>'))
+        && start < end
+    {
+        let address = trimmed[start + 1..end].trim();
+        let name = trimmed[..start].trim().trim_matches('"').trim();
+        if !address.is_empty() {
+            return ((!name.is_empty()).then_some(name), address);
+        }
+    }
+    (None, trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +93,26 @@ mod tests {
     fn domain_falls_back_to_hostname() {
         assert_eq!(domain_or("<>", "mx.example.test"), "mx.example.test");
         assert_eq!(domain_or("<a@b.test>", "mx"), "b.test");
+    }
+
+    #[test]
+    fn splits_a_display_name_from_its_address() {
+        assert_eq!(
+            split_display_name("\"Info\" <info@example.test>"),
+            (Some("Info"), "info@example.test")
+        );
+        assert_eq!(
+            split_display_name("Info <info@example.test>"),
+            (Some("Info"), "info@example.test")
+        );
+        assert_eq!(
+            split_display_name("<info@example.test>"),
+            (None, "info@example.test")
+        );
+        assert_eq!(
+            split_display_name("info@example.test"),
+            (None, "info@example.test")
+        );
+        assert_eq!(split_display_name("  "), (None, ""));
     }
 }
