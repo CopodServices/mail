@@ -955,28 +955,54 @@ async fn auto_forwards_an_arriving_message_once() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(smtp::serve(listener, state.clone(), Mode::Inbound));
 
-    deliver_inbound(addr, &address, &["Subject: hello", "", "body line"]).await;
+    deliver_inbound(
+        addr,
+        "sender@remote.test",
+        &address,
+        &[
+            "From: sender@remote.test",
+            "Subject: hello",
+            "",
+            "body line",
+        ],
+    )
+    .await;
     // A message that already came through the forward is delivered but not sent
     // on again, so a loop between two mailboxes cannot run forever.
     let marker = format!("X-Copod-Auto-Forwarded: {address}");
     deliver_inbound(
         addr,
+        "sender@remote.test",
         &address,
         &[&marker, "Subject: looped", "", "body line"],
     )
     .await;
 
     let jobs = outbound_job::Entity::find()
-        .filter(outbound_job::Column::EnvelopeFrom.eq(&address))
+        .filter(outbound_job::Column::MailboxId.eq(mailbox.id))
         .all(&db)
         .await
         .unwrap();
     assert_eq!(jobs.len(), 1, "only the unmarked arrival is forwarded");
     let job = &jobs[0];
-    assert_eq!(job.envelope_from, address);
     let recipients: Vec<String> = serde_json::from_value(job.recipients.clone()).unwrap();
     assert_eq!(recipients, vec!["dest@remote.test".to_string()]);
 
+    // The relay only accepts a forward whose envelope sender is SRS-rewritten,
+    // and a bounce to it has to find the original sender again.
+    let (local_part, srs_domain) = job
+        .envelope_from
+        .split_once('@')
+        .expect("a rewritten envelope sender");
+    assert_eq!(srs_domain, domain);
+    let key = mailcore::srs::key(&config.session_secret);
+    assert_eq!(
+        mailcore::srs::decode(local_part, srs_domain, &key, chrono::Utc::now().timestamp())
+            .as_deref(),
+        Some("sender@remote.test")
+    );
+
+    // The message itself goes out untouched, so its own DKIM signature survives.
     let payload = store
         .get(&job.storage_key)
         .await
@@ -986,7 +1012,41 @@ async fn auto_forwards_an_arriving_message_once() {
         text.contains("X-Copod-Auto-Forwarded:"),
         "the copy is marked so it cannot loop"
     );
+    assert!(
+        text.contains("From: sender@remote.test"),
+        "the forwarded message keeps its own headers: {text}"
+    );
     assert!(text.contains("body line"));
+
+    // A bounce for the forward arrives at the rewritten address and is relayed
+    // to the original sender instead of being stored for a mailbox here.
+    deliver_inbound(
+        addr,
+        "",
+        &job.envelope_from,
+        &[
+            "From: mailer-daemon@remote.test",
+            "Subject: undeliverable",
+            "",
+            "no such user",
+        ],
+    )
+    .await;
+    // The bounce is a relay of its own, not a send owned by the mailbox.
+    let scoped = outbound_job::Entity::find()
+        .filter(outbound_job::Column::MailboxId.eq(mailbox.id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(scoped.len(), 1, "the bounce is not owned by the mailbox");
+    let bounce = outbound_job::Entity::find()
+        .filter(outbound_job::Column::EnvelopeFrom.eq(""))
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("the bounce is queued with the null sender");
+    let recipients: Vec<String> = serde_json::from_value(bounce.recipients.clone()).unwrap();
+    assert_eq!(recipients, vec!["sender@remote.test".to_string()]);
 
     // Clean up the fixtures, including the stored arrivals and the forwarded copy.
     let arrivals = message::Entity::find()
@@ -994,11 +1054,16 @@ async fn auto_forwards_an_arriving_message_once() {
         .all(&db)
         .await
         .unwrap();
+    assert_eq!(arrivals.len(), 2, "the bounce is not stored here");
     for row in &arrivals {
         let _ = store.delete(&row.storage_key).await;
     }
     let _ = store.delete(&job.storage_key).await;
     let _ = outbound_job::Entity::delete_by_id(job.id).exec(&db).await;
+    let _ = store.delete(&bounce.storage_key).await;
+    let _ = outbound_job::Entity::delete_by_id(bounce.id)
+        .exec(&db)
+        .await;
     for row in arrivals {
         let _ = repo::delete_message(&db, row.id).await;
     }
@@ -1010,14 +1075,14 @@ async fn auto_forwards_an_arriving_message_once() {
 }
 
 /// Delivers one message to `recipient` over a fresh inbound session.
-async fn deliver_inbound(addr: std::net::SocketAddr, recipient: &str, lines: &[&str]) {
+async fn deliver_inbound(addr: std::net::SocketAddr, from: &str, recipient: &str, lines: &[&str]) {
     let stream = TcpStream::connect(addr).await.unwrap();
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
     assert_eq!(read_reply(&mut reader).await, 220);
     command(&mut write_half, "EHLO client.example.test").await;
     assert_eq!(read_reply(&mut reader).await, 250);
-    command(&mut write_half, "MAIL FROM:<sender@remote.test>").await;
+    command(&mut write_half, &format!("MAIL FROM:<{from}>")).await;
     assert_eq!(read_reply(&mut reader).await, 250);
     command(&mut write_half, &format!("RCPT TO:<{recipient}>")).await;
     assert_eq!(read_reply(&mut reader).await, 250);

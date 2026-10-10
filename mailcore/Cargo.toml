@@ -9,6 +9,7 @@ argon2.workspace = true
 base64.workspace = true
 chrono.workspace = true
 entity = { path = "../entity" }
+hmac.workspace = true
 mail-auth.workspace = true
 mail-builder.workspace = true
 mail-parser.workspace = true
@@ -18,6 +19,7 @@ rustls-pemfile.workspace = true
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 smtp-proto.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

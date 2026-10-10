@@ -119,11 +119,18 @@ HTML, SVG and XML, stays a download so a preview URL can never run script in the
 mail origin. Without the query the part always downloads.
 
 A mailbox may carry one auto-forward address (forward_to). A copy of each
-message delivered to that mailbox is queued to the address with the mailbox as
-the envelope sender, so the relay's sending-domain check passes. The forwarded
-copy is marked with an X-Copod-Auto-Forwarded header: a forward that loops back
-is delivered but never forwarded again, and forwarding to the mailbox's own
-address is ignored.
+message delivered to that mailbox is queued to the address. The message itself
+goes out untouched, so the sender's own DKIM signature still validates, and only
+the envelope sender is rewritten with Sender Rewriting Scheme: the relay accepts
+forwarded mail only when the envelope belongs to a domain it has verified, with
+the original sender encoded so a bounce can find its way back. The rewritten
+local part is SRS0=<hash>=<days>=<sender-domain>=<sender-local>, hashed with a
+key derived from the session secret and valid for three weeks. A bounce that
+arrives for such an address (the rewritten address matches a domain this service
+hosts and the hash checks out) is relayed on to the original sender instead of
+being stored. The forwarded copy also carries an X-Copod-Auto-Forwarded header,
+so a forward that loops back is delivered but never forwarded again, and
+forwarding to the mailbox's own address is ignored.
 
 A draft is an ordinary message row whose reader flag puts it in the drafts
 folder, with the composed message in object storage, so the drafts list, counts

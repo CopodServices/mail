@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use entity::{mailbox, message, outbound_job};
 use mailcore::policy::AuthOutcome;
-use mailcore::{address, meta, repo, store};
+use mailcore::{address, meta, repo, srs, store};
 use sea_orm::Set;
 use uuid::Uuid;
 
@@ -108,7 +108,7 @@ pub async fn store_local(
     // Auto-forward: a copy of an arriving message goes to the mailbox's
     // configured address. Losing the forward must not lose the delivery, so a
     // failure is logged and the stored copy is left alone.
-    if inbound && let Err(err) = forward_inbound(state, mailbox, raw).await {
+    if inbound && let Err(err) = forward_inbound(state, mailbox, envelope_from, raw).await {
         tracing::warn!(error = %err, mailbox = %mailbox.address, "failed to queue the auto-forward");
     }
 
@@ -117,13 +117,14 @@ pub async fn store_local(
 
 /// Queues one copy of an arriving message to the mailbox's auto-forward address.
 ///
-/// The mailbox is the envelope sender, because the relay only accepts mail from
-/// the domains it is configured to send for, and the stored message keeps its
-/// original From header. Returns the queued job id, or None when there is
-/// nothing to forward.
+/// The relay only accepts a forward whose envelope sender has been rewritten
+/// with SRS: the original sender is encoded into one of our own addresses, which
+/// a bounce can come back to, while the message keeps its own headers and its DKIM
+/// signature. Returns the queued job id, or None when there is nothing to forward.
 pub async fn forward_inbound(
     state: &AppState,
     mailbox: &mailbox::Model,
+    envelope_from: &str,
     raw: &[u8],
 ) -> Result<Option<Uuid>> {
     let Some(target) = mailbox
@@ -147,13 +148,32 @@ pub async fn forward_inbound(
         return Ok(None);
     }
 
-    let marked = mark_forwarded(raw, &mailbox.address);
+    // The rewritten sender has to live on a domain the relay has verified, so
+    // the mailbox's own domain is used. A sender that cannot be rewritten, the
+    // null sender of a bounce, falls back to the mailbox itself.
+    let forward_domain = mailbox
+        .address
+        .rsplit_once('@')
+        .map(|(_, domain)| domain)
+        .unwrap_or(&mailbox.address);
+    let srs_key = srs::key(&state.config.session_secret);
+    let envelope = srs::encode(
+        envelope_from,
+        forward_domain,
+        &srs_key,
+        chrono::Utc::now().timestamp(),
+    )
+    .unwrap_or_else(|| mailbox.address.clone());
+
+    // The message goes out byte for byte with only the loop marker on top, so the
+    // sender's DKIM signature still validates at the destination.
+    let forwarded = mark_forwarded(raw, &mailbox.address);
     let job = enqueue_remote(
         state,
         Some(mailbox.id),
-        &mailbox.address,
+        &envelope,
         std::slice::from_ref(&target),
-        &marked,
+        &forwarded,
         None,
     )
     .await?;
@@ -178,7 +198,8 @@ fn already_forwarded(raw: &[u8]) -> bool {
     false
 }
 
-/// The forwarded bytes: the original message with the marker header on top.
+/// The forwarded bytes: the received message with the loop marker on top. The
+/// rest of the message is untouched, so its DKIM signature stays valid.
 fn mark_forwarded(raw: &[u8], from: &str) -> Vec<u8> {
     let mut marked = format!("{FORWARD_MARKER}: {from}\r\n").into_bytes();
     marked.extend_from_slice(raw);
@@ -289,8 +310,8 @@ mod tests {
     fn a_marked_message_is_recognised_even_past_a_folded_header() {
         let raw = b"From: a@example.test\r\nSubject: hi\r\n\r\nbody\r\n";
         assert!(!already_forwarded(raw));
-        let marked = mark_forwarded(raw, "inbox@example.test");
-        assert!(already_forwarded(&marked));
+        let forwarded = mark_forwarded(raw, "inbox@example.test");
+        assert!(already_forwarded(&forwarded));
     }
 
     #[test]
