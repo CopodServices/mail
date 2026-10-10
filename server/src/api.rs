@@ -14,8 +14,8 @@ use mailcore::policy::AuthOutcome;
 use mailcore::{address, repo};
 use mailcore::{body, compose, store};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
-    Set,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::{OpenApi, ToSchema};
@@ -679,10 +679,14 @@ pub struct MailboxResponse {
     pub signature: Option<String>,
     /// The name recipients see beside the address in the From header.
     pub display_name: Option<String>,
+    /// Storage limit for the mailbox in bytes; 0 means unlimited.
+    pub quota_bytes: i64,
+    /// Bytes stored for the mailbox, summed across its messages.
+    pub used_bytes: i64,
 }
 
-impl From<entity::mailbox::Model> for MailboxResponse {
-    fn from(model: entity::mailbox::Model) -> Self {
+impl MailboxResponse {
+    fn new(model: entity::mailbox::Model, used_bytes: i64) -> Self {
         Self {
             id: model.id,
             address: model.address,
@@ -690,7 +694,20 @@ impl From<entity::mailbox::Model> for MailboxResponse {
             created_at: model.created_at,
             signature: model.signature,
             display_name: model.display_name,
+            quota_bytes: model.quota_bytes,
+            used_bytes,
         }
+    }
+
+    /// Builds the response with the mailbox's live storage usage.
+    pub async fn load(
+        db: &DatabaseConnection,
+        model: entity::mailbox::Model,
+    ) -> Result<Self, ApiError> {
+        let used_bytes = repo::mailbox_usage_bytes(db, model.id)
+            .await
+            .map_err(db_error)?;
+        Ok(Self::new(model, used_bytes))
     }
 }
 
@@ -3358,7 +3375,17 @@ pub async fn list_mailboxes(
             .collect(),
         None => repo::list_mailboxes(&state.db).await.map_err(db_error)?,
     };
-    let payload = mailboxes.into_iter().map(MailboxResponse::from).collect();
+    // One grouped query covers the whole list, whatever the caller's scope.
+    let usage = repo::mailbox_usage_totals(&state.db)
+        .await
+        .map_err(db_error)?;
+    let payload = mailboxes
+        .into_iter()
+        .map(|mailbox| {
+            let used_bytes = usage.get(&mailbox.id).copied().unwrap_or(0);
+            MailboxResponse::new(mailbox, used_bytes)
+        })
+        .collect();
     Ok(ListResponse::new(payload).into_response())
 }
 
@@ -3390,13 +3417,8 @@ pub async fn create_mailbox(
         .await
         .map_err(|err| conflict(err.to_string()))?;
 
-    Ok((
-        StatusCode::CREATED,
-        Json(DataResponse {
-            data: MailboxResponse::from(mailbox),
-        }),
-    )
-        .into_response())
+    let response = MailboxResponse::load(&state.db, mailbox).await?;
+    Ok((StatusCode::CREATED, Json(DataResponse { data: response })).into_response())
 }
 
 #[utoipa::path(
@@ -3441,6 +3463,11 @@ pub async fn update_mailbox(
     Json(body): Json<UpdateMailboxRequest>,
 ) -> Result<Response, ApiError> {
     let address = address.to_ascii_lowercase();
+    if let Some(quota_bytes) = body.quota_bytes
+        && quota_bytes < 0
+    {
+        return Err(bad_request("quota_bytes must not be negative"));
+    }
     if let Some(scope) = principal.scope() {
         // A session may only edit its own mailbox, and only its sender identity.
         if address != scope.address {
@@ -3467,10 +3494,8 @@ pub async fn update_mailbox(
     .await
     .map_err(db_error)?
     .ok_or_else(|| not_found("Unknown mailbox"))?;
-    Ok(Json(DataResponse {
-        data: MailboxResponse::from(updated),
-    })
-    .into_response())
+    let response = MailboxResponse::load(&state.db, updated).await?;
+    Ok(Json(DataResponse { data: response }).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -3709,6 +3734,7 @@ pub async fn send(
             &mailbox,
             message::Direction::Outbound,
             &sender,
+            &recipients.join(", "),
             &raw,
             &outcome,
         )
@@ -3736,6 +3762,7 @@ pub async fn send(
             mailbox,
             message::Direction::Inbound,
             &sender,
+            &mailbox.address,
             &raw,
             &outcome,
         )

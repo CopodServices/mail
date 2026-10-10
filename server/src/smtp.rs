@@ -420,6 +420,13 @@ impl Session {
 
         let envelope_from = self.mail_from.clone().unwrap_or_default();
         let recipients = std::mem::take(&mut self.recipients);
+        // The envelope recipient list, kept for the sender's own copy: a copy
+        // in Sent shows who the message went to, not the sender's address.
+        let envelope_to = recipients
+            .iter()
+            .map(|recipient| recipient.address.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut local = Vec::new();
         let mut remote = Vec::new();
         for recipient in recipients {
@@ -439,6 +446,7 @@ impl Session {
                 sender,
                 message::Direction::Outbound,
                 &envelope_from,
+                &envelope_to,
                 &raw,
                 &outcome,
             )
@@ -455,6 +463,7 @@ impl Session {
                 mailbox,
                 message::Direction::Inbound,
                 &envelope_from,
+                &mailbox.address,
                 &raw,
                 &outcome,
             )

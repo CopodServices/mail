@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use entity::{mailbox, message, outbound_job};
 use mailcore::policy::AuthOutcome;
@@ -8,14 +8,30 @@ use sea_orm::Set;
 use uuid::Uuid;
 
 /// Stores a message in a local mailbox and indexes it in PostgreSQL.
+///
+/// The envelope recipient is this mailbox for mail delivered here, or the
+/// addressed recipients for the copy filed in the sender's Sent folder.
 pub async fn store_local(
     state: &AppState,
     mailbox: &mailbox::Model,
     direction: message::Direction,
     envelope_from: &str,
+    envelope_to: &str,
     raw: &[u8],
     outcome: &AuthOutcome,
 ) -> Result<Uuid> {
+    // Refuse a message that would push the mailbox past its storage quota; a
+    // zero quota means unlimited. Checked before the object-store write so an
+    // over-quota message leaves nothing behind.
+    if mailbox.quota_bytes > 0 {
+        let used = repo::mailbox_usage_bytes(&state.db, mailbox.id)
+            .await
+            .context("failed to read the mailbox usage")?;
+        if exceeds_quota(used, raw.len() as i64, mailbox.quota_bytes) {
+            bail!("mailbox {} is over its storage quota", mailbox.address);
+        }
+    }
+
     let id = Uuid::now_v7();
     let now = Utc::now();
     let domain = mailbox
@@ -53,7 +69,7 @@ pub async fn store_local(
             direction: Set(direction),
             status: Set(status),
             envelope_from: Set(envelope_from.to_string()),
-            envelope_to: Set(mailbox.address.clone()),
+            envelope_to: Set(envelope_to.to_string()),
             message_id: Set(metadata.message_id),
             subject: Set(metadata.subject),
             header_from: Set(metadata.header_from),
@@ -151,4 +167,26 @@ pub async fn enqueue_remote_at(
     .await?;
 
     Ok(id)
+}
+
+/// True when storing `incoming` more bytes would exceed a positive quota. A
+/// zero quota is unlimited.
+fn exceeds_quota(used: i64, incoming: i64, quota: i64) -> bool {
+    quota > 0 && used + incoming > quota
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exceeds_quota;
+
+    #[test]
+    fn a_zero_quota_is_unlimited() {
+        assert!(!exceeds_quota(10_000, 10_000, 0));
+    }
+
+    #[test]
+    fn a_message_that_fits_is_allowed_and_one_byte_over_is_not() {
+        assert!(!exceeds_quota(100, 50, 150));
+        assert!(exceeds_quota(100, 51, 150));
+    }
 }
