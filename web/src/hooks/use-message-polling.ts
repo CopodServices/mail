@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { hasSession, SESSION_CHANGED_EVENT } from "@/lib/api/session-utils";
 import type {
 	MessageRealtimeState,
 	NewMessageEvent,
@@ -19,7 +20,22 @@ export function useMessagePolling(): MessageRealtimeState {
 	);
 	const dismissNotification = useCallback(() => setNotification(null), []);
 
+	// The socket authenticates with the session cookie, so it must not open a
+	// handshake while nobody is signed in — the API answers 401 and the browser
+	// logs a failed connection on the login page. The readable CSRF cookie is
+	// set and cleared with the session, so its presence tracks a session, and
+	// sign-in/sign-out announce the change without a reload.
+	const [signedIn, setSignedIn] = useState(false);
 	useEffect(() => {
+		if (typeof window === "undefined") return;
+		const sync = () => setSignedIn(hasSession());
+		sync();
+		window.addEventListener(SESSION_CHANGED_EVENT, sync);
+		return () => window.removeEventListener(SESSION_CHANGED_EVENT, sync);
+	}, []);
+
+	useEffect(() => {
+		if (!signedIn) return;
 		let socket: WebSocket | null = null;
 		let channel: BroadcastChannel | null = null;
 		let lockAbort: AbortController | null = null;
@@ -234,7 +250,7 @@ export function useMessagePolling(): MessageRealtimeState {
 				socket.close(1000, "Client closed");
 			}
 		};
-	}, []);
+	}, [signedIn]);
 
 	useEffect(() => {
 		if (!notification) return;

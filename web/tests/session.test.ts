@@ -40,6 +40,16 @@ describe("session cookie helpers", () => {
 		expect(utils.loginHref("/drafts")).toBe("/login?next=%2Fdrafts");
 		expect(utils.loginHref(null)).toBe("/login");
 	});
+
+	test("reports a session only when the readable CSRF cookie is present", () => {
+		// The httpOnly session cookie alone is invisible to the client; the CSRF
+		// cookie is the signal the realtime socket gates on.
+		expect(
+			utils.hasSession("cpod_mail_session=opaque; cpod_mail_csrf=tok"),
+		).toBe(true);
+		expect(utils.hasSession("cpod_mail_session=opaque")).toBe(false);
+		expect(utils.hasSession("")).toBe(false);
+	});
 });
 
 describe("signIn", () => {

@@ -34,6 +34,31 @@ export function csrfHeaders(
 	return token ? { "X-CSRF-Token": token } : {};
 }
 
+/**
+ * Fired on `window` when the browser gains or loses its session, so the
+ * realtime socket can start or stop without a page reload. Sign-in and sign-out
+ * both announce it.
+ */
+export const SESSION_CHANGED_EVENT = "copod:session-changed";
+
+/**
+ * True when the browser holds a session.
+ *
+ * The session cookie is httpOnly, so the client cannot read it; the API sets
+ * and clears the readable CSRF cookie alongside it, so that cookie's presence
+ * tracks a session that exists. Used to keep the realtime socket from opening a
+ * handshake the API would reject with 401 while nobody is signed in.
+ */
+export function hasSession(cookie?: string): boolean {
+	return readCookie(CSRF_COOKIE, cookie) !== null;
+}
+
+/** Tells listeners (the realtime socket) that the session changed. */
+export function notifySessionChanged(): void {
+	if (typeof window === "undefined") return;
+	window.dispatchEvent(new Event(SESSION_CHANGED_EVENT));
+}
+
 /** Only same-origin, path-style return targets are honoured. */
 export function safeNext(
 	value: string | null | undefined,

@@ -1,5 +1,5 @@
 import { apiUrl } from "@/lib/api/base";
-import { csrfHeaders } from "./session-utils";
+import { csrfHeaders, notifySessionChanged } from "./session-utils";
 import type { SessionMailbox } from "./types";
 
 /**
@@ -28,6 +28,9 @@ export async function signIn(
 	}
 	const body = (await response.json()) as Envelope;
 	if (!body.data) throw new Error("session.error.generic");
+	// The API has set the session and CSRF cookies; let the realtime socket know
+	// it can authenticate now.
+	notifySessionChanged();
 	return body.data;
 }
 
@@ -56,4 +59,5 @@ export async function signOut(): Promise<void> {
 	} catch {
 		// The client clears its own state regardless.
 	}
+	notifySessionChanged();
 }
