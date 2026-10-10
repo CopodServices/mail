@@ -783,6 +783,16 @@ fn bare_address(value: &str) -> String {
     trimmed.to_string()
 }
 
+/// The bare sender address behind what a client sends as the sender.
+///
+/// A mail client sends the full header (`"Info" <info@example.com>`): the display
+/// name belongs on the message's From header, but the SMTP envelope sender and
+/// the mailbox-scope check need the address alone. Recipients are read the same
+/// way. None when nothing usable is left.
+fn bare_sender(value: &str) -> Option<String> {
+    address::parse(&bare_address(value)).map(|address| address.normalized())
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SendResponse {
     pub stored: usize,
@@ -3603,11 +3613,11 @@ pub async fn send(
     principal: Principal,
     Json(body): Json<SendRequest>,
 ) -> Result<Response, ApiError> {
-    if address::parse(&body.from).is_none() {
+    let Some(sender) = bare_sender(&body.from) else {
         return Err(bad_request("Invalid from address"));
-    }
+    };
     if let Some(scope) = principal.scope()
-        && bare_address(&body.from).to_ascii_lowercase() != scope.address
+        && sender.to_ascii_lowercase() != scope.address
     {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -3683,7 +3693,7 @@ pub async fn send(
             &state,
             mailbox,
             message::Direction::Outbound,
-            &body.from,
+            &sender,
             &raw,
             &outcome,
         )
@@ -3710,7 +3720,7 @@ pub async fn send(
         delivery::enqueue_remote_at(
             &state,
             None,
-            &body.from,
+            &sender,
             &remote,
             &raw,
             scheduled_at,
@@ -3720,7 +3730,7 @@ pub async fn send(
         .map_err(internal)?;
         queued = remote.len();
     } else if !remote.is_empty() {
-        delivery::enqueue_remote(&state, None, &body.from, &remote, &raw)
+        delivery::enqueue_remote(&state, None, &sender, &remote, &raw)
             .await
             .map_err(internal)?;
         queued = remote.len();
@@ -3747,4 +3757,28 @@ pub async fn send(
         }),
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_from_header_may_carry_a_display_name() {
+        assert_eq!(
+            bare_sender("info@example.test").as_deref(),
+            Some("info@example.test")
+        );
+        assert_eq!(
+            bare_sender("<info@Example.COM>").as_deref(),
+            Some("info@example.com")
+        );
+        assert_eq!(
+            bare_sender(r#""Info" <info@example.test>"#).as_deref(),
+            Some("info@example.test")
+        );
+        assert_eq!(bare_sender(r#""Info""#), None);
+        assert_eq!(bare_sender("not-an-address"), None);
+        assert_eq!(bare_sender(""), None);
+    }
 }
