@@ -88,6 +88,7 @@ pub async fn create_mailbox(
         domain_id: Set(parent.id),
         local_part: Set(parsed.local_part),
         password_hash: Set(crate::auth::hash_password(password)?),
+        signature: Set(None),
         quota_bytes: Set(0),
         active: Set(true),
         created_at: Set(now),
@@ -158,6 +159,31 @@ pub async fn delete_message(db: &DatabaseConnection, id: Uuid) -> Result<Option<
     Ok(Some(existing))
 }
 
+/// Moves a message to another folder, keeping its other reader state.
+pub async fn set_message_folder(
+    db: &DatabaseConnection,
+    message_id: Uuid,
+    folder: &str,
+) -> Result<()> {
+    let existing = entity::message_flag::Entity::find_by_id(message_id)
+        .one(db)
+        .await?;
+    let model = entity::message_flag::ActiveModel {
+        message_id: Set(message_id),
+        read: Set(existing.as_ref().map(|flag| flag.read).unwrap_or(true)),
+        starred: Set(existing.as_ref().map(|flag| flag.starred).unwrap_or(false)),
+        folder: Set(folder.to_string()),
+        snoozed_until: Set(existing.as_ref().and_then(|flag| flag.snoozed_until)),
+        updated_at: Set(Utc::now()),
+    };
+    if existing.is_some() {
+        model.update(db).await?;
+    } else {
+        model.insert(db).await?;
+    }
+    Ok(())
+}
+
 pub async fn enqueue_job(
     db: &DatabaseConnection,
     model: outbound_job::ActiveModel,
@@ -212,11 +238,12 @@ pub async fn save_job(
         updated_at: Set(Utc::now()),
         ..Default::default()
     };
-    active
-        .update(db)
-        .await
-        .context("failed to save a queue job")?;
-    Ok(())
+    match active.update(db).await {
+        Ok(_) => Ok(()),
+        // The job can be gone because its send was cancelled while in flight.
+        Err(sea_orm::DbErr::RecordNotUpdated) => Ok(()),
+        Err(err) => Err(err).context("failed to save a queue job"),
+    }
 }
 
 pub async fn count_pending(db: &DatabaseConnection) -> Result<u64> {

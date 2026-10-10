@@ -21,4 +21,7 @@ COPY --from=builder /app/target/release/migrator /usr/local/bin/migrator
 
 EXPOSE 2525 2587 8080
 
-ENTRYPOINT ["mail"]
+# Which binary runs is the container command, so compose can start either one:
+# the default runs the mail service, and `command: ["migrator"]` applies the
+# migrations and exits. Both binaries are on PATH.
+CMD ["mail"]

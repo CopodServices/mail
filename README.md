@@ -64,17 +64,48 @@ All routes require Authorization: Bearer <API_KEY> unless API_KEY is empty.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | /api/messages | List stored mail (filter with ?mailbox=&limit=) |
-| GET | /api/messages/{id} | Message metadata |
+| GET | /api/messages | List stored mail. Filters: mailbox, mailbox_id, folder, direction, q, read, starred, limit, offset |
+| GET | /api/messages/counts | Per-folder and per-mailbox totals and unread counts |
+| GET | /api/messages/{id} | Message with body (text/html) and the attachment list |
 | GET | /api/messages/{id}/raw | Raw RFC5322 message from S3 |
+| GET | /api/messages/{id}/attachments/{index} | One attachment by position |
+| POST | /api/messages/{id}/read | Set read state ({read}) |
+| POST | /api/messages/{id}/star | Set starred state ({starred}) |
+| POST | /api/messages/{id}/snooze | Snooze until a time ({snoozed_until}) |
+| GET | /api/messages/{id}/metadata | Attachments and the unsubscribe link |
+| POST | /api/messages/{id}/cancel-schedule | Cancel a scheduled send (returns it to Drafts) |
+| DELETE | /api/messages/{id}/snooze | Return it to the inbox now |
+| GET | /api/messages/navigation | Ordered ids and unread flags for the open filter |
+| GET | /api/messages/{id}/thread | The conversation, with bodies and attachments |
+| POST | /api/messages/empty | Empty trash or spam ({mailbox_id, folder}) |
+| POST | /api/messages/bulk | Act on many messages ({message_ids, action, folder}) |
 | DELETE | /api/messages/{id} | Remove the row and the stored object |
+| GET | /api/folders | System and custom folders for a mailbox |
+| POST | /api/folders | Create a custom folder ({mailbox_id, name, color}) |
 | GET | /api/mailboxes | List mailboxes |
 | POST | /api/mailboxes | Create a mailbox ({address, password}) |
 | DELETE | /api/mailboxes/{address} | Delete a mailbox |
+| PATCH | /api/mailboxes/{address} | Set the mailbox signature ({signature}) |
 | GET | /api/domains | List domains |
 | POST | /api/domains | Create a domain with a fresh DKIM key |
 | GET | /api/domains/{name}/dkim | The DKIM TXT record to publish |
-| POST | /api/send | Compose and deliver ({from, to, subject, text, html}) |
+| POST | /api/domains/{name}/dkim | The same DKIM TXT record (GET answers too) |
+| GET | /api/attachment-policy | Attachment limits for the composer |
+| GET/POST | /api/templates, GET/DELETE /api/templates/{id} | Composer templates |
+| GET/PATCH | /api/settings/shortcuts, /api/settings/recipient-addresses | Client preferences |
+| GET | /api/contacts | A contact for an address |
+| PATCH | /api/contacts | Rename a contact |
+| POST | /api/contacts/block | Block a sender |
+| GET/POST/DELETE | /api/contacts/avatar | Contact picture, full or preview |
+| GET | /api/realtime | WebSocket pushing a frame per stored message |
+| POST | /api/drafts | Create a draft ({mailbox_id, from, to, cc, bcc, subject, text, html, in_reply_to, references_header, thread_id, forward_of_message_id}) |
+| GET/PATCH/DELETE | /api/drafts/{id} | Read, update or discard a draft |
+| POST | /api/drafts/{id}/attachments | Upload attachments (multipart) |
+| DELETE | /api/drafts/{id}/attachments/{index} | Remove an attachment |
+| POST | /api/send | Compose and deliver ({from, to, cc, bcc, subject, text, html, draft_id, scheduled_at}) |
+
+Reader state (read, starred, folder) lives in its own table, message_flags, so
+the MTA's stored messages stay immutable.
 
 ## Configuration
 
@@ -111,3 +142,22 @@ own public address), publish an MX record, PTR/rDNS for the sending hostname,
 the SPF record for the relay, the DKIM TXT record from
 GET /api/domains/{name}/dkim, and a DMARC policy. Certificates for STARTTLS are
 supplied through TLS_CERT_PATH/TLS_KEY_PATH.
+
+## Web client
+
+web/ is the cPOD Mail web client: a static, client-rendered mail reader for this
+API (inbox and threads, compose and send, sent, drafts, spam, trash, starred,
+snoozed, archived, folders, search). It is built with bun, formatted with
+Biome, and shipped as a static bundle served by nginx, which also proxies /api/*
+to this service. It calls the API's own /api/* endpoints; there is no session
+yet, so requests use the API key, and authentication will move to external SSO.
+
+    make web-install       # or: cd web && bun install
+    make web-dev           # http://localhost:3002
+    make web-build         # static export into web/out
+    make web-test          # bun test (set MAIL_API_URL for the contract suite)
+    docker build -t copod-mail-web web
+    make web-up            # docker compose up -d --build web (http://localhost:3002)
+
+See web/README.md, docs/mail-api.md, and NOTICE for the contract and the
+Mailflare attribution.

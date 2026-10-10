@@ -1,5 +1,6 @@
 pub mod address;
 pub mod auth;
+pub mod body;
 pub mod compose;
 pub mod config;
 pub mod dkim;

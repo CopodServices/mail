@@ -26,6 +26,8 @@ pub struct Model {
     pub recipients: Json,
     pub storage_key: String,
     pub message_id: Option<String>,
+    /// The Scheduled-folder copy to move to Sent once the message goes out.
+    pub scheduled_message_id: Option<Uuid>,
     pub attempts: i32,
     pub next_attempt_at: chrono::DateTime<Utc>,
     pub status: JobStatus,

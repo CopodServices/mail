@@ -33,6 +33,10 @@ pub struct Model {
     pub message_id: Option<String>,
     pub subject: Option<String>,
     pub header_from: Option<String>,
+    /// In-Reply-To header, normalized to the bare message id.
+    pub in_reply_to: Option<String>,
+    /// References header, the conversation ancestors, space separated.
+    pub references_header: Option<String>,
     pub size_bytes: i64,
     pub storage_key: String,
     pub spf_result: Option<String>,

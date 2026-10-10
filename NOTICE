@@ -1,0 +1,33 @@
+cPOD Mail
+Copyright (C) 2026 CopodServices
+
+This product includes software developed by Hieu Nguyen ("Mailflare",
+https://github.com/hieunc229/mailflare), licensed under the GNU Affero General
+Public License, version 3.
+
+Copyright (C) 2026 Hieu Nguyen — Mailflare. All rights reserved under AGPL-3.0.
+
+The mail client at web/ is a reimplementation of Mailflare's mail client. Copied
+and adapted paths:
+
+- web/src/app/(dashboard)     mail client route group (inbox, sent, drafts, spam, trash, starred, snoozed, archived, scheduled, folders, compose)
+- web/src/app/(settings)      client settings pages
+- web/src/components/**       messages, compose, ui, contacts, mail-search, shortcuts, sidebar and shell components
+- web/src/hooks/**            client data hooks
+- web/src/lib/**              email parsing/formatting, i18n, time, folders, mailboxes, mail-api and search helpers
+- web/public/locales/id.json  Indonesian translations
+
+Mailflare's Cloudflare Workers backend (D1/drizzle schema, Worker entrypoints and
+Turnstile auth) was not carried over. The client talks to this repository's Rust
+HTTP API instead, and the upstream chrome (admin, domains, calendar, drive,
+booking, AI assistant, MCP, licenses) was dropped.
+
+Mailflare is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+Because this project incorporates Mailflare code, the combined work is licensed
+under AGPL-3.0. If you run it as a network service, you must offer users the
+corresponding source (see the "Source" link in the app footer and
+NEXT_PUBLIC_SOURCE_URL).

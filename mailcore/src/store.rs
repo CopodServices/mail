@@ -78,6 +78,11 @@ pub fn inbound_key(
 }
 
 /// Storage key for an outgoing copy (also used for messages awaiting relay).
+/// Object key for a stored draft; the composer rewrites this object in place.
+pub fn draft_key(id: &Uuid, now: chrono::DateTime<chrono::Utc>) -> String {
+    format!("drafts/{}/{}.eml", now.format("%Y/%m"), id)
+}
+
 pub fn outbound_key(id: &Uuid, now: chrono::DateTime<chrono::Utc>) -> String {
     format!(
         "outbound/{:04}/{:02}/{}.eml",

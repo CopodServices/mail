@@ -11,6 +11,8 @@ pub struct Model {
     pub domain_id: Uuid,
     pub local_part: String,
     pub password_hash: String,
+    /// Appended to new messages composed from this mailbox.
+    pub signature: Option<String>,
     pub quota_bytes: i64,
     pub active: bool,
     pub created_at: chrono::DateTime<Utc>,

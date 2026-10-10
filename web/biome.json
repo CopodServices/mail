@@ -1,0 +1,84 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.4.2/schema.json",
+	"vcs": {
+		"enabled": true,
+		"clientKind": "git",
+		"useIgnoreFile": true
+	},
+	"files": {
+		"ignoreUnknown": true,
+		"includes": ["**", "!node_modules", "!.next", "!out", "!dist", "!build"]
+	},
+	"formatter": {
+		"enabled": true,
+		"indentStyle": "tab"
+	},
+	"css": {
+		"parser": {
+			"tailwindDirectives": true
+		}
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"recommended": true,
+			"a11y": {
+				"noStaticElementInteractions": "off",
+				"noLabelWithoutControl": "off",
+				"useSemanticElements": "off",
+				"useKeyWithClickEvents": "off",
+				"useButtonType": "off",
+				"noSvgWithoutTitle": "off",
+				"useAriaPropsSupportedByRole": "off",
+				"noAutofocus": "off",
+				"useFocusableInteractive": "off",
+				"useMediaCaption": "off",
+				"useAriaPropsForRole": "off",
+				"useValidAnchor": "off",
+				"noRedundantAlt": "off"
+			},
+			"correctness": {
+				"useExhaustiveDependencies": "off",
+				"noUnusedImports": "warn",
+				"noUnusedVariables": "warn",
+				"noUnusedFunctionParameters": "warn"
+			},
+			"style": {
+				"noNonNullAssertion": "off",
+				"useTemplate": "off",
+				"useConst": "off",
+				"noParameterAssign": "off"
+			},
+			"suspicious": {
+				"noArrayIndexKey": "off",
+				"noExplicitAny": "off",
+				"noDocumentCookie": "off",
+				"noAssignInExpressions": "off",
+				"noDoubleEquals": "off"
+			},
+			"performance": {
+				"noImgElement": "off"
+			},
+			"security": {
+				"noDangerouslySetInnerHtml": "off"
+			},
+			"complexity": {
+				"useOptionalChain": "off",
+				"noUselessFragments": "off",
+				"noImportantStyles": "off"
+			},
+			"nursery": {}
+		},
+		"domains": {
+			"next": "recommended",
+			"react": "recommended"
+		}
+	},
+	"assist": {
+		"actions": {
+			"source": {
+				"organizeImports": "on"
+			}
+		}
+	}
+}

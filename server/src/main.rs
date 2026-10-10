@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let (events, _) = tokio::sync::broadcast::channel(256);
     let state = AppState {
         db,
         config: config.clone(),
@@ -68,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
         secrets: secrets.clone(),
         authenticator,
         tls,
+        events,
     };
 
     bootstrap::seed(&state).await?;

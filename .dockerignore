@@ -4,3 +4,9 @@
 /.env
 /.backups
 *.log
+# The Rust image does not use the web client; keeping it out of the context
+# avoids copying node_modules and stops Dockerfile edits from busting the
+# cargo build cache.
+/web
+Dockerfile
+.dockerignore

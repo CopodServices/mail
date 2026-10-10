@@ -1,0 +1,94 @@
+import { getApiKey } from "@/lib/api/client";
+import { MAIL_API_BASE } from "@/lib/mail-api/base";
+import { messageHref } from "@/lib/mail-routes";
+import type { NewMessageEvent } from "./message-realtime-types";
+
+export const REALTIME_FALLBACK_INTERVAL_MS = 60_000;
+export const REALTIME_HEARTBEAT_INTERVAL_MS = 25_000;
+export const REALTIME_RECONNECT_MAX_MS = 30_000;
+const BROWSER_NOTIFICATIONS_ENABLED_KEY = "copod:browser-notifications-enabled";
+
+export function areBrowserNotificationsEnabled(): boolean {
+	try {
+		return (
+			window.localStorage.getItem(BROWSER_NOTIFICATIONS_ENABLED_KEY) !== "false"
+		);
+	} catch {
+		return true;
+	}
+}
+
+export function setBrowserNotificationsEnabled(enabled: boolean): void {
+	window.localStorage.setItem(
+		BROWSER_NOTIFICATIONS_ENABLED_KEY,
+		String(enabled),
+	);
+}
+
+export function getRealtimeWebSocketUrl(): string {
+	const url = MAIL_API_BASE
+		? new URL(MAIL_API_BASE)
+		: new URL(window.location.origin);
+	const protocol = url.protocol === "https:" ? "wss:" : "ws:";
+	// Browsers cannot send headers on a WebSocket, so the API key travels in the query.
+	const key = getApiKey();
+	const query = key ? "?key=" + encodeURIComponent(key) : "";
+	return protocol + "//" + url.host + "/api/realtime" + query;
+}
+
+export function getReconnectDelay(attempt: number): number {
+	return Math.min(1_000 * 2 ** attempt, REALTIME_RECONNECT_MAX_MS);
+}
+
+export function parseNewMessageEvent(value: string): NewMessageEvent | null {
+	try {
+		const payload = JSON.parse(value) as Partial<NewMessageEvent>;
+		if (
+			payload.type !== "new_message" ||
+			typeof payload.messageId !== "string" ||
+			typeof payload.mailboxId !== "string" ||
+			typeof payload.from !== "string"
+		) {
+			return null;
+		}
+
+		return {
+			type: "new_message",
+			messageId: payload.messageId,
+			mailboxId: payload.mailboxId,
+			from: payload.from,
+			fromName: typeof payload.fromName === "string" ? payload.fromName : null,
+			subject: typeof payload.subject === "string" ? payload.subject : null,
+		};
+	} catch {
+		return null;
+	}
+}
+
+export async function showBrowserNewMessageNotification(
+	event: NewMessageEvent,
+): Promise<void> {
+	if (
+		typeof Notification === "undefined" ||
+		Notification.permission !== "granted" ||
+		!areBrowserNotificationsEnabled() ||
+		document.visibilityState === "visible"
+	) {
+		return;
+	}
+
+	try {
+		const notification = new Notification(event.subject || "New email", {
+			body: `From ${event.fromName ?? event.from}`,
+			icon: "/icon-96.png",
+			tag: event.messageId,
+		});
+		notification.onclick = () => {
+			window.focus();
+			window.location.assign(messageHref("/inbox", event.messageId));
+			notification.close();
+		};
+	} catch {
+		// The in-app new message popup still handles this email.
+	}
+}

@@ -94,6 +94,7 @@ async fn stores_inbound_mail_to_s3_and_postgres() {
         secrets: secrets.clone(),
         authenticator: None,
         tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -194,6 +195,7 @@ async fn relays_submission_through_the_smarthost() {
         secrets: secrets.clone(),
         authenticator: None,
         tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -327,4 +329,95 @@ async fn read_reply(reader: &mut (impl AsyncBufReadExt + Unpin)) -> u16 {
             return code;
         }
     }
+}
+
+/// The API key guards every /api route, and the three domain endpoints answer
+/// behind it. Requires the compose stack and MAIL_TEST_INTEGRATION=1.
+#[tokio::test]
+async fn the_api_key_guards_the_domain_endpoints() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let mut config = test_config();
+    config.api_key = Some("test-key-123".to_string());
+    let config = Arc::new(config);
+
+    let db = Database::connect(&config.database_url).await.unwrap();
+    let store = MailStore::new(&config.s3).unwrap();
+    let secrets = Arc::new(SecretBox::new(&config.encryption_key).unwrap());
+    let state = AppState {
+        db,
+        config: config.clone(),
+        store,
+        secrets: secrets.clone(),
+        authenticator: None,
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+
+    let call = |method: &'static str, path: String, key: Option<&'static str>| {
+        let app = crate::api::router(state.clone());
+        async move {
+            let mut request = Request::builder().method(method).uri(path);
+            if let Some(key) = key {
+                request = request.header("authorization", format!("Bearer {key}"));
+            }
+            let response = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (status, String::from_utf8_lossy(&bytes).to_string())
+        }
+    };
+
+    let (status, _) = call("GET", "/api/domains".to_string(), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "no key must be rejected");
+
+    let (status, _) = call("GET", "/api/domains".to_string(), Some("wrong")).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a wrong key must be rejected"
+    );
+
+    let (status, body) = call("GET", "/api/domains".to_string(), Some("test-key-123")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("data"), "{body}");
+
+    // A fresh domain, then its DKIM record over POST.
+    let name = format!("it-{}.test", Uuid::now_v7().simple());
+    let create = Request::builder()
+        .method("POST")
+        .uri("/api/domains")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer test-key-123")
+        .body(Body::from(serde_json::json!({ "name": name }).to_string()))
+        .unwrap();
+    let response = crate::api::router(state.clone())
+        .oneshot(create)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let (status, body) = call(
+        "POST",
+        format!("/api/domains/{name}/dkim"),
+        Some("test-key-123"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("v=DKIM1"), "{body}");
+    assert!(
+        body.contains(&format!("default._domainkey.{name}")),
+        "{body}"
+    );
 }

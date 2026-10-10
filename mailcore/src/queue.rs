@@ -50,6 +50,12 @@ impl Queue {
                 job.status = JobStatus::Sent;
                 job.last_error = None;
                 tracing::info!(id = %job.id, "relayed outbound message");
+                // A scheduled message leaves the Scheduled folder when it goes out.
+                if let Some(message_id) = job.scheduled_message_id
+                    && let Err(err) = repo::set_message_folder(&self.db, message_id, "sent").await
+                {
+                    tracing::warn!(error = %err, "failed to move the scheduled copy to sent");
+                }
             }
             Err(err) => {
                 job.attempts += 1;
@@ -80,9 +86,16 @@ impl Queue {
     }
 
     async fn deliver(&self, job: &entity::outbound_job::Model) -> Result<()> {
-        let mut payload = self.store.get(&job.storage_key).await?;
         let recipients: Vec<String> = serde_json::from_value(job.recipients.clone())
             .context("failed to decode recipients")?;
+
+        // A scheduled message to a local mailbox has nothing to hand over; the
+        // job exists only so the copy leaves the Scheduled folder on time.
+        if recipients.is_empty() {
+            return Ok(());
+        }
+
+        let mut payload = self.store.get(&job.storage_key).await?;
 
         if let Some(address) = crate::address::parse(&job.envelope_from)
             && let Some(domain) = repo::find_domain(&self.db, &address.domain).await?

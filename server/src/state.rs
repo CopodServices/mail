@@ -14,4 +14,14 @@ pub struct AppState {
     /// None when DNS verification is disabled or the resolver could not start.
     pub authenticator: Option<Arc<MessageAuthenticator>>,
     pub tls: Option<Arc<rustls::ServerConfig>>,
+    /// Live updates for connected clients; each message is a JSON frame.
+    pub events: tokio::sync::broadcast::Sender<String>,
+}
+
+impl AppState {
+    /// Nudges every connected client that mail changed.
+    pub fn publish(&self, frame: String) {
+        // No subscribers is the normal case outside the web client.
+        let _ = self.events.send(frame);
+    }
 }

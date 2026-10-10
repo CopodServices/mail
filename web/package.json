@@ -1,0 +1,46 @@
+{
+	"name": "copod-mail-web",
+	"version": "0.1.0",
+	"private": true,
+	"description": "cPOD Mail web client (static, client-rendered; talks to the mail API)",
+	"license": "AGPL-3.0-only",
+	"type": "module",
+	"packageManager": "bun@1.4.2",
+	"scripts": {
+		"dev": "next dev -p 3002",
+		"build": "next build",
+		"preview": "bunx serve@14 out -l 3002",
+		"lint": "biome check",
+		"format": "biome format --write",
+		"test": "bun test"
+	},
+	"dependencies": {
+		"@radix-ui/react-dialog": "^1.1.15",
+		"@radix-ui/react-dropdown-menu": "^2.1.16",
+		"@radix-ui/react-label": "^2.1.8",
+		"@radix-ui/react-slot": "^1.2.4",
+		"@tanstack/react-query": "^5.100.11",
+		"class-variance-authority": "^0.7.1",
+		"clsx": "^2.1.1",
+		"css-tree": "^3.2.1",
+		"dompurify": "^3.4.16",
+		"lucide-react": "^1.16.0",
+		"next": "16.3.3",
+		"parse-srcset": "^1.0.2",
+		"parse5": "^8.0.1",
+		"postal-mime": "^2.7.4",
+		"react": "^19.2.6",
+		"react-dom": "^19.2.6",
+		"tailwind-merge": "^3.6.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.4.2",
+		"@tailwindcss/postcss": "^4",
+		"@types/css-tree": "^3.2.0",
+		"@types/node": "^20.19.41",
+		"@types/react": "^19.1.7",
+		"@types/react-dom": "^19.1.7",
+		"tailwindcss": "^4",
+		"typescript": "^5.7.4"
+	}
+}

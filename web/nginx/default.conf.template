@@ -1,0 +1,86 @@
+# cPOD Mail web client.
+#
+# Serves the static, client-rendered bundle and forwards /api/* to the mail API.
+# ${MAIL_API_URL} is substituted by the image entrypoint when the container
+# starts, so the browser only ever calls this origin and the API can move
+# without rebuilding the bundle. Keep the value a bare origin with no trailing
+# slash: the /api prefix is forwarded unchanged, because the mail API already
+# serves under /api/*.
+
+map $http_upgrade $connection_upgrade {
+	default upgrade;
+	''      close;
+}
+
+gzip on;
+gzip_vary on;
+gzip_min_length 1024;
+gzip_types
+	text/plain
+	text/css
+	application/javascript
+	application/json
+	application/manifest+json
+	image/svg+xml;
+
+server {
+	listen 8080;
+	server_name _;
+	server_tokens off;
+
+	root /usr/share/nginx/html;
+	index index.html;
+
+	# The API accepts larger messages than nginx's 1m default.
+	client_max_body_size 32m;
+
+	add_header X-Content-Type-Options nosniff always;
+	add_header X-Frame-Options SAMEORIGIN always;
+	add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+	# The API, straight through: the client calls the same /api/* the mail
+	# service exposes.
+	location /api/ {
+		# A literal host resolves once, at start-up, so it must resolve from
+		# inside this container (in compose, the mail service name does).
+		proxy_pass ${MAIL_API_URL};
+		proxy_http_version 1.1;
+		proxy_set_header Host $host;
+		proxy_set_header X-Real-IP $remote_addr;
+		proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-Proto $scheme;
+		# /api/realtime is a WebSocket.
+		proxy_set_header Upgrade $http_upgrade;
+		proxy_set_header Connection $connection_upgrade;
+		proxy_read_timeout 1h;
+		add_header X-Content-Type-Options nosniff always;
+		add_header X-Frame-Options SAMEORIGIN always;
+		add_header Referrer-Policy strict-origin-when-cross-origin always;
+	}
+
+	# Hashed build output; safe to cache forever.
+	location /_next/static/ {
+		add_header Cache-Control "public, max-age=31536000, immutable" always;
+		add_header X-Content-Type-Options nosniff always;
+		add_header X-Frame-Options SAMEORIGIN always;
+		add_header Referrer-Policy strict-origin-when-cross-origin always;
+		access_log off;
+	}
+
+	location = /manifest.webmanifest {
+		types { }
+		default_type application/manifest+json;
+	}
+
+	location / {
+		try_files $uri $uri/ @app;
+	}
+
+	# A static export has no per-message page, so path-style deep links resolve
+	# to the folder's list page. The client reads ?message=<id> instead.
+	location @app {
+		rewrite ^/(archived|drafts|inbox|scheduled|sent|snoozed|spam|starred|trash)(/.*)?$ /$1/index.html last;
+		rewrite ^/folders(/.*)?$ /folders/index.html last;
+		rewrite ^ /index.html last;
+	}
+}

@@ -33,3 +33,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 migration = { path = "../migration" }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

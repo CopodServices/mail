@@ -1,4 +1,9 @@
+pub mod contact;
 pub mod domain;
+pub mod folder;
 pub mod mailbox;
 pub mod message;
+pub mod message_flag;
 pub mod outbound_job;
+pub mod setting;
+pub mod template;
