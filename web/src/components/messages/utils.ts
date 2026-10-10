@@ -1,8 +1,10 @@
 import type { MailboxOption } from "@/components/mailbox-provider";
 import type { Message } from "@/hooks/types";
 import { markMessagesReadInCaches } from "@/hooks/utils";
+import { apiFetch } from "@/lib/api/client";
 import { bulkMessageAction } from "@/lib/api/endpoints";
 import type {
+	BulkMessageAction,
 	EmptyFolderResponse,
 	PermanentDeleteFolder,
 } from "@/lib/api/types";

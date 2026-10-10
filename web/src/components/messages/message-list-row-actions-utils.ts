@@ -1,4 +1,5 @@
 import type { MessageCountsDelta } from "@/hooks/types";
+import { apiFetch } from "@/lib/api/client";
 import { setMessageStarred } from "@/lib/api/endpoints";
 import type { TranslationKey } from "@/lib/i18n/types";
 import {

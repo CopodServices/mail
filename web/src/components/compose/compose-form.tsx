@@ -23,6 +23,14 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Tooltip } from "@/components/ui/tooltip";
 import { apiFetch } from "@/lib/api/client";
+import {
+	type DraftInput,
+	deleteDraft,
+	removeDraftAttachment,
+	saveDraft,
+	sendMessage,
+	uploadDraftAttachments,
+} from "@/lib/api/endpoints";
 import { formatEmailAddress, getEmailAddress } from "@/lib/email/address";
 import { cn } from "@/lib/utils";
 import type { ComposeAttachmentPolicy } from "./attachment-policy-types";

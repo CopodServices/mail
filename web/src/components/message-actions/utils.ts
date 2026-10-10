@@ -12,6 +12,7 @@ import {
 } from "@/components/compose/rich-text-utils";
 import { sanitizeEmailHtml } from "@/components/messages/message-detail/email-html-sanitizer";
 import { markMessagesReadInCaches } from "@/hooks/utils";
+import { apiFetch } from "@/lib/api/client";
 import { bulkMessageAction } from "@/lib/api/endpoints";
 import type { BulkMessageAction } from "@/lib/api/types";
 import {
