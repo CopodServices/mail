@@ -1,0 +1,71 @@
+name: cpod-mail
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: cpod
+      POSTGRES_PASSWORD: cpod
+      POSTGRES_DB: cpod
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cpod -d cpod"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # S3-compatible store for local development (Cloudflare R2 / S3 in
+  # production). The bucket below is created on start-up.
+  s3:
+    image: adobe/s3mock:latest
+    environment:
+      COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: copod-mail
+      COM_ADOBE_TESTING_S3MOCK_STORE_REGION: us-east-1
+    ports:
+      - "9090:9090"
+
+  # SMTP catcher that stands in for the real smarthost. Web UI on :8025.
+  mailpit:
+    image: axllent/mailpit:latest
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  migrate:
+    build:
+      context: .
+    command: ["migrator"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://cpod:cpod@postgres:5432/cpod
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  mail:
+    build:
+      context: .
+    command: ["mail"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://cpod:cpod@postgres:5432/cpod
+      S3_ENDPOINT: http://s3:9090
+      RELAY_HOST: mailpit
+    ports:
+      - "2525:2525"
+      - "2587:2587"
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+volumes:
+  pgdata:

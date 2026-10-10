@@ -1,0 +1,289 @@
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(Alias::new("domains"))
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("name"))
+                            .string()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("dkim_selector"))
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("dkim_private_key"))
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("dkim_public_key"))
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("active"))
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("created_at"))
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .extra("DEFAULT now()".to_owned()),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("updated_at"))
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .extra("DEFAULT now()".to_owned()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(Alias::new("mailboxes"))
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("address"))
+                            .string()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(Alias::new("domain_id")).uuid().not_null())
+                    .col(ColumnDef::new(Alias::new("local_part")).string().not_null())
+                    .col(
+                        ColumnDef::new(Alias::new("password_hash"))
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("quota_bytes"))
+                            .big_integer()
+                            .not_null()
+                            .default(0i64),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("active"))
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("created_at"))
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .extra("DEFAULT now()".to_owned()),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("updated_at"))
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .extra("DEFAULT now()".to_owned()),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_mailboxes_domain")
+                            .from(Alias::new("mailboxes"), Alias::new("domain_id"))
+                            .to(Alias::new("domains"), Alias::new("id"))
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_mailboxes_domain_id")
+                    .table(Alias::new("mailboxes"))
+                    .col(Alias::new("domain_id"))
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(Alias::new("messages"))
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Alias::new("mailbox_id")).uuid().null())
+                    .col(ColumnDef::new(Alias::new("direction")).string().not_null())
+                    .col(ColumnDef::new(Alias::new("status")).string().not_null())
+                    .col(
+                        ColumnDef::new(Alias::new("envelope_from"))
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("envelope_to"))
+                            .string()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Alias::new("message_id")).string().null())
+                    .col(ColumnDef::new(Alias::new("subject")).string().null())
+                    .col(ColumnDef::new(Alias::new("header_from")).string().null())
+                    .col(
+                        ColumnDef::new(Alias::new("size_bytes"))
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("storage_key"))
+                            .string()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Alias::new("spf_result")).string().null())
+                    .col(ColumnDef::new(Alias::new("dkim_result")).string().null())
+                    .col(ColumnDef::new(Alias::new("dmarc_result")).string().null())
+                    .col(ColumnDef::new(Alias::new("dmarc_policy")).string().null())
+                    .col(
+                        ColumnDef::new(Alias::new("received_at"))
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .extra("DEFAULT now()".to_owned()),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_messages_mailbox")
+                            .from(Alias::new("messages"), Alias::new("mailbox_id"))
+                            .to(Alias::new("mailboxes"), Alias::new("id"))
+                            .on_delete(ForeignKeyAction::SetNull),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_messages_mailbox_received")
+                    .table(Alias::new("messages"))
+                    .col(Alias::new("mailbox_id"))
+                    .col(Alias::new("received_at"))
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(Alias::new("outbound_jobs"))
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Alias::new("mailbox_id")).uuid().null())
+                    .col(
+                        ColumnDef::new(Alias::new("envelope_from"))
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("recipients"))
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("storage_key"))
+                            .string()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Alias::new("message_id")).string().null())
+                    .col(
+                        ColumnDef::new(Alias::new("attempts"))
+                            .integer()
+                            .not_null()
+                            .default(0i32),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("next_attempt_at"))
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .extra("DEFAULT now()".to_owned()),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("status"))
+                            .string()
+                            .not_null()
+                            .default("pending"),
+                    )
+                    .col(ColumnDef::new(Alias::new("last_error")).text().null())
+                    .col(
+                        ColumnDef::new(Alias::new("created_at"))
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .extra("DEFAULT now()".to_owned()),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("updated_at"))
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .extra("DEFAULT now()".to_owned()),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_outbound_jobs_status")
+                    .table(Alias::new("outbound_jobs"))
+                    .col(Alias::new("status"))
+                    .col(Alias::new("next_attempt_at"))
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        for table in ["outbound_jobs", "messages", "mailboxes", "domains"] {
+            manager
+                .drop_table(
+                    Table::drop()
+                        .table(Alias::new(table))
+                        .if_exists()
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+}

@@ -1,0 +1,35 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mail"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+dotenvy.workspace = true
+entity = { path = "../entity" }
+mail-auth.workspace = true
+mailcore = { path = "../mailcore" }
+rustls.workspace = true
+sea-orm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smtp-proto.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
+utoipa-scalar.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+migration = { path = "../migration" }

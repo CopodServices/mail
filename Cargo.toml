@@ -1,0 +1,65 @@
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+resolver = "3"
+members = [
+    "entity",
+    "mailcore",
+    "migration",
+    "migrator",
+    "server",
+]
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+aes-gcm = "0.10"
+argon2 = "0.5"
+axum = { version = "0.8.6", features = ["macros"] }
+base64 = "0.22"
+chrono = { version = "0.4.42", features = ["serde"] }
+dotenvy = "0.15"
+mail-auth = { version = "0.13", default-features = false, features = ["ring", "generate"] }
+mail-builder = "1.0"
+mail-parser = "0.11"
+object_store = { version = "0.14", features = ["aws"] }
+rand = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+sea-orm = { version = "2.0.0-rc", features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-uuid",
+    "with-chrono",
+] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+smtp-proto = "0.2"
+tokio = { version = "1.48", features = [
+    "macros",
+    "rt-multi-thread",
+    "time",
+    "net",
+    "io-util",
+    "fs",
+    "signal",
+    "sync",
+] }
+tokio-rustls = "0.26"
+tower-http = { version = "0.7.0", features = [
+    "trace",
+    "limit",
+    "timeout",
+    "request-id",
+] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
+utoipa = { version = "5.4.0", features = ["uuid", "chrono"] }
+utoipa-axum = "0.2.0"
+utoipa-scalar = { version = "0.3.0", features = ["axum"] }
+uuid = { version = "1.18.1", features = ["v7", "serde"] }
+validator = { version = "0.21.0", features = ["derive"] }
+webpki-roots = "1"
