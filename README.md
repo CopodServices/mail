@@ -278,6 +278,9 @@ to this service. It calls the API's own /api/* endpoints and signs in with a
 mailbox address and password; the API answers with an httpOnly session cookie,
 so the browser bundle holds no long-lived credential of its own.
 
+CI builds it on every pull request and pushes `ghcr.io/copodservices/mail-web`
+on main, next to the API image `ghcr.io/copodservices/mail`.
+
     make web-install       # or: cd web && bun install
     make web-dev           # http://localhost:3002
     make web-build         # static export into web/out
