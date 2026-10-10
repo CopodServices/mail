@@ -7,10 +7,12 @@ needed and the API address does not have to be baked into the bundle.
 
 ## Authentication
 
-There is no session yet. Requests carry the API key as
-"Authorization: Bearer <key>" (the client reads NEXT_PUBLIC_MAIL_API_KEY, or a
-key saved in the browser). Authentication will move to external SSO; when it
-does, the client will present that token the same way.
+The web client is a plain browser client and holds no credentials: it never
+sends an API key or any other secret. API keys belong to the server-side
+services that call this API, and a deployment that requires one for the browser
+has to front the API with a service that injects it. Browser authentication
+will move to external SSO; the client routes every request through one place so
+that stays a single change.
 
 ## Domain endpoints (API key)
 
@@ -75,9 +77,8 @@ Every endpoint the web client calls is now implemented.
 
 A message sent with scheduled_at waits in the Scheduled folder and goes out
 when its time arrives: it is queued with that time as its next attempt, and the
-worker moves the copy to Sent once the relay accepts it. The socket needs no
-headers, so when an API key is configured the client passes it as a query
-parameter; on the same origin the container proxies the upgrade through.
+worker moves the copy to Sent once the relay accepts it. On the same origin the
+container proxies the WebSocket upgrade through.
 
 ## Response shapes
 

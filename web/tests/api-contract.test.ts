@@ -9,10 +9,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 
 const base = process.env.MAIL_API_URL?.trim().replace(/\/+$/, "");
-const apiKey = process.env.NEXT_PUBLIC_MAIL_API_KEY?.trim() ?? "";
-const authHeaders: Record<string, string> = apiKey
-	? { authorization: "Bearer " + apiKey }
-	: {};
 // The client reads this when its API base module is first imported.
 process.env.NEXT_PUBLIC_MAIL_API_URL = base ?? "";
 
@@ -20,7 +16,7 @@ type Client = typeof import("@/lib/mail-api/client");
 type Adapt = typeof import("@/lib/mail-api/adapters");
 
 async function readJson(path: string) {
-	const response = await fetch((base ?? "") + path, { headers: authHeaders });
+	const response = await fetch((base ?? "") + path);
 	expect(response.ok).toBe(true);
 	return response.json();
 }
@@ -110,7 +106,7 @@ describe.skipIf(!base)("the web client against the live API", () => {
 		const signature = "Regards," + String.fromCharCode(10) + "QA";
 		const saved = await fetch(base + "/api/mailboxes/" + mailboxAddress, {
 			method: "PATCH",
-			headers: { "content-type": "application/json", ...authHeaders },
+			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ signature }),
 		});
 		expect(saved.ok).toBe(true);
@@ -121,7 +117,7 @@ describe.skipIf(!base)("the web client against the live API", () => {
 		);
 		await fetch(base + "/api/mailboxes/" + mailboxAddress, {
 			method: "PATCH",
-			headers: { "content-type": "application/json", ...authHeaders },
+			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ signature: null }),
 		});
 	});

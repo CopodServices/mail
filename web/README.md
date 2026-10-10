@@ -21,15 +21,15 @@ production). Every page loads its data in the browser from the mail API.
     bun run dev        # http://localhost:3002
 
 The dev server talks to the API at the same origin. To point it elsewhere, set
-NEXT_PUBLIC_MAIL_API_URL (for example http://localhost:8080) and
-NEXT_PUBLIC_MAIL_API_KEY in .env, then restart.
+NEXT_PUBLIC_MAIL_API_URL (for example http://localhost:8080) in .env, then
+restart.
 
 ## API
 
-The client calls the mail API directly under /api/*. There is no session yet:
-requests carry an API key as "Authorization: Bearer <key>" when one is set
-(NEXT_PUBLIC_MAIL_API_KEY, or a value saved in the browser), and authentication
-will move to external SSO later. See ../docs/mail-api.md for the endpoints the
+The client calls the mail API directly under /api/*. It is a plain web client:
+it sends no credentials of its own and never holds an API key, so anything that
+has to stay secret belongs to the service fronting the API. Authentication will
+move to external SSO later. See ../docs/mail-api.md for the endpoints the
 client uses.
 
 The API base URL is a run-time decision, not a build-time one. The bundle is
@@ -38,10 +38,6 @@ origin under /api/*; in the container nginx forwards those requests to the host
 in MAIL_API_URL, read from the environment when the container starts. Pointing
 the client at a different API is then a container restart, not a rebuild, and
 the client needs no CORS setup.
-
-An API key is the one thing that must reach the browser, so it is either baked
-in with NEXT_PUBLIC_MAIL_API_KEY or saved in the browser (localStorage key
-"copod:api-key"); a saved key wins.
 
 ## Routes
 

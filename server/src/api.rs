@@ -4,7 +4,6 @@ use axum::Json;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, Multipart, Path, Query, State};
-use axum::http::HeaderMap;
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -2793,8 +2792,8 @@ pub async fn get_contact_avatar(
 
 /// Upgrades to a WebSocket that pushes a frame whenever mail is stored.
 ///
-/// Browsers cannot set headers on a WebSocket, so when an API key is required
-/// it is accepted as a query parameter as well as the Authorization header.
+/// The API key is taken from the Authorization header like every other route;
+/// it is never accepted in the query string.
 #[utoipa::path(
     get,
     path = "/api/realtime",
@@ -2803,27 +2802,9 @@ pub async fn get_contact_avatar(
 )]
 pub async fn realtime(
     State(state): State<AppState>,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    headers: HeaderMap,
+    _key: ApiKey,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    if let Some(expected) = state.config.api_key.as_deref() {
-        let provided = query.get("key").map(String::as_str).or_else(|| {
-            headers
-                .get(header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .map(str::trim)
-        });
-        if !provided.is_some_and(|value| constant_time_eq(value.as_bytes(), expected.as_bytes())) {
-            return Err(ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "Unauthorized",
-                "Missing or invalid API key",
-            )
-            .code("unauthorized"));
-        }
-    }
     Ok(ws.on_upgrade(move |socket| serve_realtime(socket, state)))
 }
 

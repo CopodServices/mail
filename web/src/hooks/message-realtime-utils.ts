@@ -1,11 +1,10 @@
-import { getApiKey } from "@/lib/api/client";
 import { MAIL_API_BASE } from "@/lib/mail-api/base";
 import { messageHref } from "@/lib/mail-routes";
 import type { NewMessageEvent } from "./message-realtime-types";
 
 export const REALTIME_FALLBACK_INTERVAL_MS = 60_000;
 export const REALTIME_HEARTBEAT_INTERVAL_MS = 25_000;
-export const REALTIME_RECONNECT_MAX_MS = 30_000;
+const REALTIME_RECONNECT_MAX_MS = 30_000;
 const BROWSER_NOTIFICATIONS_ENABLED_KEY = "copod:browser-notifications-enabled";
 
 export function areBrowserNotificationsEnabled(): boolean {
@@ -30,10 +29,7 @@ export function getRealtimeWebSocketUrl(): string {
 		? new URL(MAIL_API_BASE)
 		: new URL(window.location.origin);
 	const protocol = url.protocol === "https:" ? "wss:" : "ws:";
-	// Browsers cannot send headers on a WebSocket, so the API key travels in the query.
-	const key = getApiKey();
-	const query = key ? "?key=" + encodeURIComponent(key) : "";
-	return protocol + "//" + url.host + "/api/realtime" + query;
+	return protocol + "//" + url.host + "/api/realtime";
 }
 
 export function getReconnectDelay(attempt: number): number {

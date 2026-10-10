@@ -14,10 +14,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # Baked into the bundle. Leave empty to call the API through this origin (/api).
 ARG NEXT_PUBLIC_MAIL_API_URL=""
-ARG NEXT_PUBLIC_MAIL_API_KEY=""
 ARG NEXT_PUBLIC_SOURCE_URL="https://github.com/copodservices/mail"
 ENV NEXT_PUBLIC_MAIL_API_URL=$NEXT_PUBLIC_MAIL_API_URL
-ENV NEXT_PUBLIC_MAIL_API_KEY=$NEXT_PUBLIC_MAIL_API_KEY
 ENV NEXT_PUBLIC_SOURCE_URL=$NEXT_PUBLIC_SOURCE_URL
 RUN bun run build
 

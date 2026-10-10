@@ -150,7 +150,8 @@ API (inbox and threads, compose and send, sent, drafts, spam, trash, starred,
 snoozed, archived, folders, search). It is built with bun, formatted with
 Biome, and shipped as a static bundle served by nginx, which also proxies /api/*
 to this service. It calls the API's own /api/* endpoints; there is no session
-yet, so requests use the API key, and authentication will move to external SSO.
+yet, so the browser bundle holds no credentials of its own, and authentication
+will move to external SSO.
 
     make web-install       # or: cd web && bun install
     make web-dev           # http://localhost:3002
