@@ -1,4 +1,4 @@
-# Mail API and the web client
+# cPOD Mail API and the web client
 
 The web client (web/) is a static, client-rendered bundle. It talks to this
 service directly under /api/* and, in the container, nginx proxies /api/* to
@@ -7,22 +7,51 @@ needed and the API address does not have to be baked into the bundle.
 
 ## Authentication
 
-The web client is a plain browser client and holds no credentials: it never
-sends an API key or any other secret. API keys belong to the server-side
-services that call this API, and a deployment that requires one for the browser
-has to front the API with a service that injects it. Browser authentication
-will move to external SSO; the client routes every request through one place so
-that stays a single change.
+There are two kinds of caller, and the API tells them apart on every route:
 
-## Domain endpoints (API key)
+- **Operator** — Authorization: Bearer API_KEY. This is the admin credential:
+  it manages every tenant and is what domains and mailboxes are created with.
+  When API_KEY is unset (development) an unauthenticated caller is the operator.
+- **Mailbox session** — the cookie the web client gets from POST /api/session.
+  It reaches exactly one mailbox: the client's mailbox filters are ignored, so
+  every list, read, write, draft, contact, template, preference and realtime
+  frame is scoped to it, and anything else answers 404.
 
-The three endpoints the API exposes for domains stay behind the API key:
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | /api/session | {address, password} -> verify the mailbox password and set the cookies |
+| GET | /api/session | The signed-in mailbox (null for the operator key) |
+| DELETE | /api/session | Clear the session and CSRF cookies |
+
+The session cookie (cpod_mail_session) is httpOnly, SameSite=Lax and Secure when
+SESSION_COOKIE_SECURE is set; it carries a 12-hour JWT. The CSRF cookie
+(cpod_mail_csrf) is readable so the client can send its value back in the
+X-CSRF-Token header on every non-GET request — a cookie-authenticated write
+without it is refused with 403. The client sends everything through one wrapper
+(web/src/lib/api/client.ts): credentials: "same-origin", the CSRF header on
+writes, and a return to /login on any 401. Cross-origin access is deliberately
+not supported: the client is served same-origin, with nginx proxying /api/*.
+
+## Operator endpoints (API key)
+
+Tenant lifecycle, behind the API key:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | /api/domains | List domains |
-| POST | /api/domains | Create a domain with a fresh DKIM key (idempotent) |
-| POST | /api/domains/{name}/dkim | The DKIM TXT record to publish (GET also answers) |
+| POST | /api/domains | Create a domain (idempotent) |
+| GET | /api/domains/{name} | One domain |
+| PATCH | /api/domains/{name} | Set {active}; a disabled tenant stops sending and receiving |
+| DELETE | /api/domains/{name} | Remove a domain and its mailboxes |
+| GET | /api/mailboxes | List mailboxes (?domain=<name> filters) |
+| POST | /api/mailboxes | Create a mailbox ({address, password}) |
+| PATCH | /api/mailboxes/{address} | {signature, password, quota_bytes, active} |
+| DELETE | /api/mailboxes/{address} | Delete a mailbox |
+
+DKIM is not part of this API: the configured relay signs outbound mail, so each
+tenant domain publishes the authentication records that provider asks for
+(typically SPF, a return-path CNAME, a DKIM CNAME and DMARC). See the Relay
+section of ../README.md; the provider itself is only RELAY_* configuration.
 
 
 ## Endpoints
@@ -47,8 +76,8 @@ The client's whole reading path is served by the API today:
 | DELETE | /api/messages/{id} | Delete a message |
 | GET | /api/folders | System and custom folders |
 | POST | /api/folders | Create a custom folder |
-| GET | /api/mailboxes | Mailboxes |
-| PATCH | /api/mailboxes/{address} | Set the mailbox signature |
+| GET | /api/mailboxes | Mailboxes (a session sees only its own) |
+| PATCH | /api/mailboxes/{address} | Set the mailbox signature (a session may set only its own) |
 | GET | /api/attachment-policy | Attachment limits for the composer |
 | POST | /api/drafts, /api/drafts/{id} | Drafts: create, read, update, discard (forward_of_message_id copies its attachments) |
 | POST | /api/drafts/{id}/attachments, DELETE /api/drafts/{id}/attachments/{index} | Draft attachments |
@@ -66,8 +95,8 @@ returns to its folder on its own. The message row
 itself is never mutated. Threading uses the In-Reply-To and References headers,
 captured at intake into the message row.
 
-Client preferences live in a single settings row (there are no accounts yet), and
-templates are a small table the composer lists and fills from.
+Client preferences are one settings row per mailbox (keyed by the mailbox
+address), and templates are a small table the composer lists and fills from.
 
 A draft is an ordinary message row whose reader flag puts it in the drafts
 folder, with the composed message in object storage, so the drafts list, counts

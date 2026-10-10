@@ -58,6 +58,8 @@ services:
       DATABASE_URL: postgres://cpod:cpod@postgres:5432/cpod
       S3_ENDPOINT: http://s3:9090
       RELAY_HOST: mailpit
+      # The local stack is plain HTTP, so the session cookie cannot be Secure.
+      SESSION_COOKIE_SECURE: "false"
     ports:
       - "2525:2525"
       - "2587:2587"

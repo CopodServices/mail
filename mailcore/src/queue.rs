@@ -1,6 +1,5 @@
 use crate::relay::Relay;
 use crate::repo;
-use crate::secrets::SecretBox;
 use crate::store::MailStore;
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -9,14 +8,13 @@ use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Background relay worker. It claims due jobs, DKIM-signs the stored message
-/// with the sender's domain key and hands it to the smarthost, retrying with
-/// exponential backoff on transient failures.
+/// Background relay worker. It claims due jobs and hands the stored message to
+/// the smarthost unchanged (the relay signs), retrying with exponential backoff
+/// on transient failures and failing at once on a permanent rejection.
 pub struct Queue {
     pub db: DatabaseConnection,
     pub store: MailStore,
     pub relay: Relay,
-    pub secrets: SecretBox,
     pub max_attempts: i32,
     pub helo: String,
 }
@@ -60,7 +58,13 @@ impl Queue {
             Err(err) => {
                 job.attempts += 1;
                 job.last_error = Some(err.to_string());
-                if job.attempts >= self.max_attempts {
+                let permanent = err
+                    .downcast_ref::<crate::relay::SmtpRejection>()
+                    .is_some_and(|rejection| rejection.permanent);
+                if permanent {
+                    job.status = JobStatus::Failed;
+                    tracing::error!(id = %job.id, error = %err, "outbound message rejected");
+                } else if job.attempts >= self.max_attempts {
                     job.status = JobStatus::Failed;
                     tracing::error!(id = %job.id, error = %err, "giving up on outbound message");
                 } else {
@@ -95,15 +99,7 @@ impl Queue {
             return Ok(());
         }
 
-        let mut payload = self.store.get(&job.storage_key).await?;
-
-        if let Some(address) = crate::address::parse(&job.envelope_from)
-            && let Some(domain) = repo::find_domain(&self.db, &address.domain).await?
-        {
-            let private_key = self.secrets.decrypt_bytes(&domain.dkim_private_key)?;
-            payload =
-                crate::dkim::sign(&private_key, &domain.name, &domain.dkim_selector, &payload)?;
-        }
+        let payload = self.store.get(&job.storage_key).await?;
 
         self.relay
             .deliver(&self.helo, &job.envelope_from, &recipients, &payload)

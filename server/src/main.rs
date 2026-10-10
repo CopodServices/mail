@@ -1,6 +1,7 @@
 mod api;
 mod bootstrap;
 mod delivery;
+mod session;
 mod smtp;
 mod state;
 
@@ -12,7 +13,6 @@ use mail_auth::MessageAuthenticator;
 use mailcore::config::Config;
 use mailcore::queue::Queue;
 use mailcore::relay::Relay;
-use mailcore::secrets::SecretBox;
 use mailcore::store::MailStore;
 use state::AppState;
 use std::sync::Arc;
@@ -42,7 +42,6 @@ async fn main() -> anyhow::Result<()> {
     info!("✅ Connected to database");
 
     let store = MailStore::new(&config.s3).context("failed to build the mail store")?;
-    let secrets = Arc::new(SecretBox::new(&config.encryption_key)?);
 
     let tls = match &config.tls {
         Some(tls) => Some(mailcore::tls::server_config(&tls.cert_path, &tls.key_path)?),
@@ -66,7 +65,6 @@ async fn main() -> anyhow::Result<()> {
         db,
         config: config.clone(),
         store: store.clone(),
-        secrets: secrets.clone(),
         authenticator,
         tls,
         events,
@@ -78,7 +76,6 @@ async fn main() -> anyhow::Result<()> {
         db: state.db.clone(),
         store: store.clone(),
         relay: Relay::new(config.relay.clone()),
-        secrets: (*secrets).clone(),
         max_attempts: config.max_attempts,
         helo: config.hostname.clone(),
     });

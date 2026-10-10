@@ -6,7 +6,6 @@ use mailcore::config::{Config, RelayConfig, RelayEncryption, S3Config, TlsConfig
 use mailcore::queue::Queue;
 use mailcore::relay::Relay;
 use mailcore::repo;
-use mailcore::secrets::SecretBox;
 use mailcore::store::MailStore;
 use migration::{Migrator, MigratorTrait};
 use sea_orm::{ColumnTrait, Database, EntityTrait, QueryFilter};
@@ -22,8 +21,8 @@ fn test_config() -> Config {
     Config {
         database_url: std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://cpod:cpod@localhost:5432/cpod".to_string()),
-        encryption_key: std::env::var("ENCRYPTION_KEY")
-            .unwrap_or_else(|_| "bWFpbC1kZXYtZW5jcnlwdGlvbi1rZXktMzJieXRlcyE=".to_string()),
+        session_secret: "test-session-secret".to_string(),
+        session_cookie_secure: false,
         api_key: None,
         server_port: 0,
         smtp_listen: "127.0.0.1:0".to_string(),
@@ -78,20 +77,16 @@ async fn stores_inbound_mail_to_s3_and_postgres() {
     Migrator::up(&db, None).await.expect("migrate");
 
     let store = MailStore::new(&config.s3).expect("object store");
-    let secrets = Arc::new(SecretBox::new(&config.encryption_key).expect("secret box"));
 
     let domain = format!("test-{}.example", Uuid::now_v7().simple());
-    repo::ensure_domain(&db, &domain, &secrets).await.unwrap();
+    repo::ensure_domain(&db, &domain).await.unwrap();
     let address = format!("inbox@{domain}");
-    let mailbox = repo::create_mailbox(&db, &address, "secret", &secrets)
-        .await
-        .unwrap();
+    let mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
 
     let state = AppState {
         db: db.clone(),
         config: config.clone(),
         store: store.clone(),
-        secrets: secrets.clone(),
         authenticator: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
@@ -179,20 +174,16 @@ async fn relays_submission_through_the_smarthost() {
     Migrator::up(&db, None).await.expect("migrate");
 
     let store = MailStore::new(&config.s3).expect("object store");
-    let secrets = Arc::new(SecretBox::new(&config.encryption_key).expect("secret box"));
 
     let domain = format!("submit-{}.example", Uuid::now_v7().simple());
-    repo::ensure_domain(&db, &domain, &secrets).await.unwrap();
+    repo::ensure_domain(&db, &domain).await.unwrap();
     let address = format!("sender@{domain}");
-    repo::create_mailbox(&db, &address, "secret", &secrets)
-        .await
-        .unwrap();
+    repo::create_mailbox(&db, &address, "secret").await.unwrap();
 
     let state = AppState {
         db: db.clone(),
         config: config.clone(),
         store: store.clone(),
-        secrets: secrets.clone(),
         authenticator: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
@@ -267,7 +258,6 @@ async fn relays_submission_through_the_smarthost() {
         db: db.clone(),
         store: store.clone(),
         relay: Relay::new(config.relay.clone()),
-        secrets: (*secrets).clone(),
         max_attempts: 3,
         helo: config.hostname.clone(),
     };
@@ -331,10 +321,11 @@ async fn read_reply(reader: &mut (impl AsyncBufReadExt + Unpin)) -> u16 {
     }
 }
 
-/// The API key guards every /api route, and the three domain endpoints answer
-/// behind it. Requires the compose stack and MAIL_TEST_INTEGRATION=1.
+/// Session auth end to end: the operator key manages every tenant, a mailbox
+/// session reaches only its own mailbox, and cookie writes need the CSRF token.
+/// Requires the compose stack and MAIL_TEST_INTEGRATION=1.
 #[tokio::test]
-async fn the_api_key_guards_the_domain_endpoints() {
+async fn sessions_scope_a_mailbox_and_the_operator_key_manages_tenants() {
     if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
         eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
         return;
@@ -351,73 +342,163 @@ async fn the_api_key_guards_the_domain_endpoints() {
 
     let db = Database::connect(&config.database_url).await.unwrap();
     let store = MailStore::new(&config.s3).unwrap();
-    let secrets = Arc::new(SecretBox::new(&config.encryption_key).unwrap());
     let state = AppState {
-        db,
+        db: db.clone(),
         config: config.clone(),
         store,
-        secrets: secrets.clone(),
         authenticator: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
 
-    let call = |method: &'static str, path: String, key: Option<&'static str>| {
+    let domain = format!("it-{}.test", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let alpha = format!("alpha@{domain}");
+    let beta = format!("beta@{domain}");
+    repo::create_mailbox(&db, &alpha, "secret").await.unwrap();
+    repo::create_mailbox(&db, &beta, "secret").await.unwrap();
+
+    let send = |request: Request<Body>| {
         let app = crate::api::router(state.clone());
         async move {
-            let mut request = Request::builder().method(method).uri(path);
-            if let Some(key) = key {
-                request = request.header("authorization", format!("Bearer {key}"));
-            }
-            let response = app
-                .oneshot(request.body(Body::empty()).unwrap())
-                .await
-                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
             let status = response.status();
+            let headers = response.headers().clone();
             let bytes = response.into_body().collect().await.unwrap().to_bytes();
-            (status, String::from_utf8_lossy(&bytes).to_string())
+            (status, headers, String::from_utf8_lossy(&bytes).to_string())
         }
     };
 
-    let (status, _) = call("GET", "/api/domains".to_string(), None).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "no key must be rejected");
+    // Without a key, the tenant endpoints are closed.
+    let anonymous = Request::builder()
+        .method("GET")
+        .uri("/api/domains")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(anonymous).await.0, StatusCode::UNAUTHORIZED);
 
-    let (status, _) = call("GET", "/api/domains".to_string(), Some("wrong")).await;
-    assert_eq!(
-        status,
-        StatusCode::UNAUTHORIZED,
-        "a wrong key must be rejected"
+    // CORS is off: a browser on another origin gets no access-control headers.
+    let cross_origin = Request::builder()
+        .method("GET")
+        .uri("/api/session")
+        .header("origin", "https://client.example")
+        .body(Body::empty())
+        .unwrap();
+    let (_, headers, _) = send(cross_origin).await;
+    assert!(
+        headers.get("access-control-allow-origin").is_none(),
+        "the API must not answer cross-origin requests"
     );
 
-    let (status, body) = call("GET", "/api/domains".to_string(), Some("test-key-123")).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("data"), "{body}");
+    let login_body =
+        |password: &str| serde_json::json!({ "address": alpha, "password": password }).to_string();
 
-    // A fresh domain, then its DKIM record over POST.
-    let name = format!("it-{}.test", Uuid::now_v7().simple());
-    let create = Request::builder()
+    // A wrong password is refused.
+    let wrong = Request::builder()
         .method("POST")
-        .uri("/api/domains")
+        .uri("/api/session")
+        .header("content-type", "application/json")
+        .body(Body::from(login_body("nope")))
+        .unwrap();
+    assert_eq!(send(wrong).await.0, StatusCode::UNAUTHORIZED);
+
+    // The right password sets the session and CSRF cookies.
+    let login = Request::builder()
+        .method("POST")
+        .uri("/api/session")
+        .header("content-type", "application/json")
+        .body(Body::from(login_body("secret")))
+        .unwrap();
+    let (status, headers, _) = send(login).await;
+    assert_eq!(status, StatusCode::OK);
+    let cookies = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let session = crate::session::cookie_value(&cookies, crate::session::SESSION_COOKIE)
+        .expect("session cookie");
+    let csrf =
+        crate::session::cookie_value(&cookies, crate::session::CSRF_COOKIE).expect("csrf cookie");
+    let cookie_header = format!(
+        "{}={}; {}={}",
+        crate::session::SESSION_COOKIE,
+        session,
+        crate::session::CSRF_COOKIE,
+        csrf
+    );
+
+    let with_session = |method: &'static str, path: String| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("cookie", cookie_header.clone())
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    // The session sees only its own mailbox.
+    let (status, _, body) = send(with_session("GET", "/api/mailboxes".to_string())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains(&alpha), "{body}");
+    assert!(!body.contains(&beta), "{body}");
+
+    // A session is not an operator.
+    assert_eq!(
+        send(with_session("GET", "/api/domains".to_string()))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Cookie writes need the CSRF token, and may only touch the own mailbox.
+    let patch_mailbox = |address: &str, with_csrf: bool| {
+        let mut builder = Request::builder()
+            .method("PATCH")
+            .uri(format!("/api/mailboxes/{address}"))
+            .header("content-type", "application/json")
+            .header("cookie", cookie_header.clone());
+        if with_csrf {
+            builder = builder.header("x-csrf-token", csrf.clone());
+        }
+        builder
+            .body(Body::from(
+                serde_json::json!({ "signature": "bye" }).to_string(),
+            ))
+            .unwrap()
+    };
+    assert_eq!(
+        send(patch_mailbox(&alpha, false)).await.0,
+        StatusCode::FORBIDDEN,
+        "a write without the CSRF token is rejected"
+    );
+    assert_eq!(send(patch_mailbox(&alpha, true)).await.0, StatusCode::OK);
+    assert_eq!(
+        send(patch_mailbox(&beta, true)).await.0,
+        StatusCode::NOT_FOUND,
+        "another tenant mailbox is invisible"
+    );
+
+    // The operator key still manages the tenant, including deactivation.
+    let deactivate = Request::builder()
+        .method("PATCH")
+        .uri(format!("/api/domains/{domain}"))
         .header("content-type", "application/json")
         .header("authorization", "Bearer test-key-123")
-        .body(Body::from(serde_json::json!({ "name": name }).to_string()))
+        .body(Body::from(
+            serde_json::json!({ "active": false }).to_string(),
+        ))
         .unwrap();
-    let response = crate::api::router(state.clone())
-        .oneshot(create)
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-
-    let (status, body) = call(
-        "POST",
-        format!("/api/domains/{name}/dkim"),
-        Some("test-key-123"),
-    )
-    .await;
+    let (status, _, body) = send(deactivate).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("v=DKIM1"), "{body}");
-    assert!(
-        body.contains(&format!("default._domainkey.{name}")),
-        "{body}"
-    );
+    assert!(body.contains("\"active\":false"), "{body}");
+
+    // Clean up the fixtures.
+    let _ = repo::delete_mailbox(&db, &alpha).await;
+    let _ = repo::delete_mailbox(&db, &beta).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
 }

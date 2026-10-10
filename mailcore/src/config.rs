@@ -75,7 +75,10 @@ pub struct TlsConfig {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
-    pub encryption_key: String,
+    /// HS256 signing key for webmail session cookies (base64, 32 bytes).
+    pub session_secret: String,
+    /// Marks the session cookie Secure; disable only for plain-HTTP deployments.
+    pub session_cookie_secure: bool,
     pub api_key: Option<String>,
     pub server_port: u16,
     pub smtp_listen: String,
@@ -115,7 +118,8 @@ impl Config {
 
         Config {
             database_url: required("DATABASE_URL"),
-            encryption_key: required("ENCRYPTION_KEY"),
+            session_secret: required("SESSION_SECRET"),
+            session_cookie_secure: flag("SESSION_COOKIE_SECURE", true),
             api_key: optional("API_KEY"),
             server_port: number("SERVER_PORT", 8080u16),
             smtp_listen: optional("SMTP_LISTEN").unwrap_or_else(|| "0.0.0.0:2525".to_string()),

@@ -10,6 +10,33 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
+/// A refusal from the smarthost, carrying whether it is worth retrying.
+///
+/// A 4xx reply is temporary (greylisting, rate limits) and the queue retries
+/// with backoff; a 5xx reply is permanent (bad SPF/DKIM/MX, an unapproved
+/// sending domain, bad credentials) and the queue fails the job at once.
+#[derive(Debug)]
+pub struct SmtpRejection {
+    pub permanent: bool,
+    pub message: String,
+}
+
+impl std::fmt::Display for SmtpRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for SmtpRejection {}
+
+/// Wraps an SMTP reply as a rejection, classifying 5xx as permanent.
+fn rejection(response: &Response<String>) -> anyhow::Error {
+    anyhow::Error::new(SmtpRejection {
+        permanent: response.code >= 500 && response.code < 600,
+        message: format!("relay replied {} {}", response.code, response.message),
+    })
+}
+
 /// Minimal SMTP client used to hand messages to the smarthost. It relays the
 /// already-signed bytes unchanged, so no message rebuilding happens here.
 pub struct Relay {
@@ -99,15 +126,20 @@ impl Relay {
         for recipient in recipients {
             let response = run(&mut conn, &format!("RCPT TO:<{recipient}>\r\n")).await?;
             if response.code != 250 && response.code != 251 {
-                bail!(
-                    "relay rejected recipient {recipient}: {} {}",
-                    response.code,
-                    response.message
-                );
+                return Err(anyhow::Error::new(SmtpRejection {
+                    permanent: response.code >= 500 && response.code < 600,
+                    message: format!(
+                        "relay rejected recipient {recipient}: {} {}",
+                        response.code, response.message
+                    ),
+                }));
             }
         }
 
-        expect(&run(&mut conn, "DATA\r\n").await?, 354, "DATA")?;
+        let data = run(&mut conn, "DATA\r\n").await?;
+        if data.code != 354 {
+            return Err(rejection(&data));
+        }
 
         let mut payload = dot_stuff(raw);
         if !payload.ends_with(b"\r\n") {
@@ -117,7 +149,10 @@ impl Relay {
         conn.write_all(&payload).await?;
         conn.flush().await?;
 
-        expect(&read_response(&mut conn).await?, 250, "message acceptance")?;
+        let accepted = read_response(&mut conn).await?;
+        if accepted.code != 250 {
+            return Err(rejection(&accepted));
+        }
 
         let _ = run(&mut conn, "QUIT\r\n").await;
         Ok(())
@@ -145,12 +180,22 @@ async fn run(conn: &mut Conn<OutboundStream>, command: &str) -> Result<Response<
 fn expect(response: &Response<String>, code: u16, step: &str) -> Result<()> {
     if response.code == code {
         Ok(())
+    } else if response.code >= 500 && response.code < 600 {
+        Err(anyhow::Error::new(SmtpRejection {
+            permanent: true,
+            message: format!(
+                "relay refused {step}: {} {}",
+                response.code, response.message
+            ),
+        }))
     } else {
-        bail!(
-            "relay refused {step}: {} {}",
-            response.code,
-            response.message
-        )
+        Err(anyhow::Error::new(SmtpRejection {
+            permanent: false,
+            message: format!(
+                "relay deferred {step}: {} {}",
+                response.code, response.message
+            ),
+        }))
     }
 }
 

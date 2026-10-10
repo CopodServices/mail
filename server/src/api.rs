@@ -1,16 +1,17 @@
 use crate::delivery;
+use crate::session;
 use crate::state::AppState;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, Multipart, Path, Query, State};
 use axum::http::request::Parts;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use entity::{contact, folder, mailbox, message, message_flag, outbound_job, setting, template};
+use entity::{contact, folder, message, message_flag, outbound_job, setting, template};
 use mailcore::policy::AuthOutcome;
-use mailcore::{address, dkim, repo};
+use mailcore::{address, repo};
 use mailcore::{body, compose, store};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
@@ -25,9 +26,10 @@ use uuid::Uuid;
 #[derive(OpenApi)]
 #[openapi(
     tags(
+        (name = "session", description = "Webmail sign-in"),
         (name = "messages", description = "Stored mail"),
         (name = "mailboxes", description = "Mailboxes"),
-        (name = "domains", description = "Domains and DKIM records"),
+        (name = "domains", description = "Tenant domains"),
         (name = "send", description = "Outbound submission through the relay")
     ),
     info(
@@ -40,6 +42,7 @@ struct ApiDoc;
 
 pub fn router(state: AppState) -> axum::Router {
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .merge(session_router())
         .merge(messages_router())
         .merge(mailboxes_router())
         .merge(domains_router())
@@ -54,6 +57,14 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/readyz", get(ready))
         .merge(Scalar::with_url("/scalar", api.clone()))
         .route("/scalar/openapi.json", get(Json(api)))
+}
+
+fn session_router() -> OpenApiRouter<AppState> {
+    use utoipa_axum::routes;
+    OpenApiRouter::new()
+        .routes(routes!(create_session))
+        .routes(routes!(get_session))
+        .routes(routes!(delete_session))
 }
 
 fn messages_router() -> OpenApiRouter<AppState> {
@@ -94,8 +105,9 @@ fn domains_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_domains))
         .routes(routes!(create_domain))
-        .routes(routes!(domain_dkim))
-        .routes(routes!(domain_dkim_post))
+        .routes(routes!(get_domain))
+        .routes(routes!(update_domain))
+        .routes(routes!(delete_domain))
 }
 
 fn contacts_router() -> OpenApiRouter<AppState> {
@@ -147,36 +159,154 @@ async fn ready() -> &'static str {
 // Authentication
 // ---------------------------------------------------------------------------
 
-/// Bearer API key required on every /api route (skipped when API_KEY is unset).
-pub struct ApiKey;
+/// The mailbox a signed-in session may reach: exactly one address.
+#[derive(Debug, Clone)]
+pub struct SessionScope {
+    pub mailbox_id: Uuid,
+    pub address: String,
+    pub domain: String,
+}
 
-impl FromRequestParts<AppState> for ApiKey {
+/// The authenticated caller on a /api route: the operator (holding the API key,
+/// which manages every tenant) or a mailbox session limited to its own mail.
+#[derive(Debug, Clone)]
+pub enum Principal {
+    Operator,
+    Mailbox(SessionScope),
+}
+
+impl Principal {
+    pub fn scope(&self) -> Option<&SessionScope> {
+        match self {
+            Principal::Mailbox(scope) => Some(scope),
+            Principal::Operator => None,
+        }
+    }
+
+    /// The mailbox a session is limited to; None for the operator, who sees all.
+    pub fn mailbox_scope(&self) -> Option<Uuid> {
+        self.scope().map(|scope| scope.mailbox_id)
+    }
+
+    /// Admin operations (domains, mailbox lifecycle) are operator-only.
+    pub fn require_operator(&self) -> Result<(), ApiError> {
+        match self {
+            Principal::Operator => Ok(()),
+            Principal::Mailbox(_) => Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "Forbidden",
+                "This operation requires the operator API key",
+            )
+            .code("forbidden")),
+        }
+    }
+}
+
+impl FromRequestParts<AppState> for Principal {
     type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let Some(expected) = state.config.api_key.as_deref() else {
-            return Ok(ApiKey);
-        };
+        if let Some(key) = state.config.api_key.as_deref() {
+            let provided = bearer_token(parts);
+            if let Some(value) = provided
+                && constant_time_eq(value.as_bytes(), key.as_bytes())
+            {
+                return Ok(Principal::Operator);
+            }
+            return session_principal(parts, state)?
+                .ok_or_else(|| unauthorized("Missing or invalid API key or session"));
+        }
+
+        // No API key configured: an unauthenticated browser is the operator
+        // (the local development mode the client contract tests rely on), but a
+        // valid session cookie still narrows the caller to its own mailbox.
+        Ok(session_principal(parts, state)?.unwrap_or(Principal::Operator))
+    }
+}
+
+fn bearer_token(parts: &Parts) -> Option<&str> {
+    parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+}
+
+fn unauthorized(detail: &str) -> ApiError {
+    ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized", detail).code("unauthorized")
+}
+
+/// Resolves a mailbox session from the session cookie and, for cookie-backed
+/// writes, enforces the double-submit CSRF token.
+///
+/// When no API key is configured the token is also accepted as a bearer token
+/// or a token query parameter, so a cross-origin dev server can sign in without
+/// a same-origin cookie; production uses the cookie.
+fn session_principal(parts: &Parts, state: &AppState) -> Result<Option<Principal>, ApiError> {
+    let (token, from_cookie) = match request_cookie(&parts.headers, session::SESSION_COOKIE) {
+        Some(token) => (token, true),
+        None if state.config.api_key.is_none() => {
+            let query = parts
+                .uri
+                .query()
+                .and_then(|query| query_value(query, "token"));
+            match bearer_token(parts).map(str::to_string).or(query) {
+                Some(token) => (token, false),
+                None => return Ok(None),
+            }
+        }
+        None => return Ok(None),
+    };
+
+    let Some(claims) = session::verify(&state.config.session_secret, &token) else {
+        return Ok(None);
+    };
+    let Ok(mailbox_id) = Uuid::parse_str(&claims.sub) else {
+        return Ok(None);
+    };
+
+    if from_cookie && !matches!(parts.method.as_str(), "GET" | "HEAD" | "OPTIONS") {
+        let expected = request_cookie(&parts.headers, session::CSRF_COOKIE).unwrap_or_default();
         let provided = parts
             .headers
-            .get(header::AUTHORIZATION)
+            .get("x-csrf-token")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .map(str::trim);
-
-        match provided {
-            Some(value) if constant_time_eq(value.as_bytes(), expected.as_bytes()) => Ok(ApiKey),
-            _ => Err(ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "Unauthorized",
-                "Missing or invalid API key",
+            .unwrap_or_default();
+        if expected.is_empty() || !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "Forbidden",
+                "Missing or invalid CSRF token",
             )
-            .code("unauthorized")),
+            .code("csrf"));
         }
     }
+
+    Ok(Some(Principal::Mailbox(SessionScope {
+        mailbox_id,
+        address: claims.email,
+        domain: claims.domain,
+    })))
+}
+
+/// Reads a cookie value out of a request's Cookie header.
+fn request_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    let header = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())?;
+    session::cookie_value(header, name)
+}
+
+/// Reads one value out of a URL query string.
+fn query_value(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| value.to_string())
+    })
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -184,6 +314,123 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+// ---------------------------------------------------------------------------
+// Session
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SessionRequest {
+    /// The mailbox address, e.g. user@example.com.
+    pub address: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SessionResponse {
+    pub mailbox_id: Uuid,
+    pub address: String,
+    pub domain: String,
+}
+
+/// Signs a mailbox in: the password is checked against the stored argon2 hash,
+/// then an httpOnly session cookie and a readable CSRF cookie are set.
+#[utoipa::path(
+    post,
+    path = "/api/session",
+    tag = "session",
+    request_body = SessionRequest,
+    responses(
+        (status = 200, description = "Signed in", body = DataResponse<SessionResponse>),
+        (status = 401, description = "Wrong address or password")
+    )
+)]
+pub async fn create_session(
+    State(state): State<AppState>,
+    Json(body): Json<SessionRequest>,
+) -> Result<Response, ApiError> {
+    let Some(mailbox) = repo::find_active_mailbox(&state.db, &body.address)
+        .await
+        .map_err(db_error)?
+    else {
+        return Err(unauthorized("Wrong address or password"));
+    };
+    if !mailcore::auth::verify_password(&mailbox.password_hash, &body.password) {
+        return Err(unauthorized("Wrong address or password"));
+    }
+
+    let domain = mailbox
+        .address
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.to_string())
+        .unwrap_or_default();
+    let token = session::mint(
+        &state.config.session_secret,
+        mailbox.id,
+        &mailbox.address,
+        &domain,
+    )
+    .map_err(internal)?;
+    let secure = state.config.session_cookie_secure;
+
+    Ok(with_cookies(
+        Json(DataResponse {
+            data: SessionResponse {
+                mailbox_id: mailbox.id,
+                address: mailbox.address.clone(),
+                domain,
+            },
+        })
+        .into_response(),
+        [
+            session::session_cookie(&token, secure),
+            session::csrf_cookie(&session::csrf_token(), secure),
+        ],
+    ))
+}
+
+/// The mailbox behind the current session, or null for the operator API key.
+#[utoipa::path(
+    get,
+    path = "/api/session",
+    tag = "session",
+    responses((status = 200, description = "The signed-in mailbox", body = DataResponse<Option<SessionResponse>>))
+)]
+pub async fn get_session(principal: Principal) -> Response {
+    let data = principal.scope().map(|scope| SessionResponse {
+        mailbox_id: scope.mailbox_id,
+        address: scope.address.clone(),
+        domain: scope.domain.clone(),
+    });
+    Json(DataResponse { data }).into_response()
+}
+
+/// Clears both session cookies.
+#[utoipa::path(
+    delete,
+    path = "/api/session",
+    tag = "session",
+    responses((status = 204, description = "Signed out"))
+)]
+pub async fn delete_session() -> Response {
+    with_cookies(
+        StatusCode::NO_CONTENT.into_response(),
+        [
+            session::cleared_cookie(session::SESSION_COOKIE),
+            session::cleared_cookie(session::CSRF_COOKIE),
+        ],
+    )
+}
+
+/// Appends Set-Cookie headers to a response.
+fn with_cookies<const N: usize>(mut response: Response, cookies: [String; N]) -> Response {
+    for cookie in cookies {
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -446,16 +693,34 @@ impl From<entity::mailbox::Model> for MailboxResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateMailboxRequest {
-    /// Replaces the mailbox signature; null clears it.
+    /// Replaces the mailbox signature; explicit null clears it, omitted leaves
+    /// it unchanged. The one field a mailbox session may set on itself.
+    #[serde(default, deserialize_with = "double_option")]
+    pub signature: Option<Option<String>>,
+    /// Operator only: rotate the mailbox password.
     #[serde(default)]
-    pub signature: Option<String>,
+    pub password: Option<String>,
+    /// Operator only: storage quota in bytes (0 for unlimited).
+    #[serde(default)]
+    pub quota_bytes: Option<i64>,
+    /// Operator only: activate or deactivate the mailbox.
+    #[serde(default)]
+    pub active: Option<bool>,
+}
+
+/// Distinguishes an absent JSON field (None) from an explicit null (Some(None)).
+fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DomainResponse {
     pub id: Uuid,
     pub name: String,
-    pub dkim_selector: String,
     pub active: bool,
 }
 
@@ -464,18 +729,15 @@ impl From<entity::domain::Model> for DomainResponse {
         Self {
             id: model.id,
             name: model.name,
-            dkim_selector: model.dkim_selector,
             active: model.active,
         }
     }
 }
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DkimResponse {
-    pub name: String,
-    pub selector: String,
-    pub record_name: String,
-    pub record_value: String,
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateDomainRequest {
+    /// Operator only: activate or deactivate the whole tenant.
+    pub active: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -652,7 +914,16 @@ const SYSTEM_FOLDERS: [(&str, &str); 9] = [
     ("trash", "Trash"),
 ];
 
-async fn resolve_mailbox(state: &AppState, query: &MessageQuery) -> Result<Option<Uuid>, ApiError> {
+/// The mailbox a request targets. A session is pinned to its own mailbox, so
+/// the client's mailbox/mailbox_id filters are ignored for it.
+async fn resolve_mailbox(
+    state: &AppState,
+    query: &MessageQuery,
+    scope: Option<Uuid>,
+) -> Result<Option<Uuid>, ApiError> {
+    if let Some(mailbox_id) = scope {
+        return Ok(Some(mailbox_id));
+    }
     if let Some(id) = query.mailbox_id {
         return Ok(Some(id));
     }
@@ -663,6 +934,27 @@ async fn resolve_mailbox(state: &AppState, query: &MessageQuery) -> Result<Optio
             .map(|mailbox| mailbox.id)),
         None => Ok(None),
     }
+}
+
+/// 404s when a mailbox session reaches for anything but its own mailbox.
+fn ensure_scope(
+    principal: &Principal,
+    mailbox_id: Option<Uuid>,
+    label: &str,
+) -> Result<(), ApiError> {
+    match principal.scope() {
+        Some(scope) if mailbox_id != Some(scope.mailbox_id) => Err(not_found(label)),
+        _ => Ok(()),
+    }
+}
+
+/// Client preferences are per mailbox for a session, one shared row for the
+/// operator.
+fn settings_scope(principal: &Principal) -> &str {
+    principal
+        .scope()
+        .map(|scope| scope.address.as_str())
+        .unwrap_or(SETTINGS_SCOPE)
 }
 
 async fn load_flags(state: &AppState, ids: &[Uuid]) -> Result<Vec<message_flag::Model>, ApiError> {
@@ -714,8 +1006,9 @@ async fn upsert_flag(
 async fn filtered_messages(
     state: &AppState,
     query: &MessageQuery,
+    scope: Option<Uuid>,
 ) -> Result<Vec<(message::Model, Option<message_flag::Model>)>, ApiError> {
-    let mailbox_id = resolve_mailbox(state, query).await?;
+    let mailbox_id = resolve_mailbox(state, query, scope).await?;
 
     let mut condition = Condition::all();
     if let Some(mailbox_id) = mailbox_id {
@@ -869,7 +1162,7 @@ pub struct AttachmentPolicyResponse {
 )]
 pub async fn attachment_policy(
     State(state): State<AppState>,
-    _key: ApiKey,
+    _principal: Principal,
 ) -> Result<Response, ApiError> {
     let max_bytes = state.config.max_message_size as i64;
     Ok(Json(DataResponse {
@@ -904,10 +1197,10 @@ pub async fn attachment_policy(
 )]
 pub async fn list_messages(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Query(query): Query<MessageQuery>,
 ) -> Result<Response, ApiError> {
-    let items = filtered_messages(&state, &query).await?;
+    let items = filtered_messages(&state, &query, principal.mailbox_scope()).await?;
     let total = items.len() as i64;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let offset = query.offset.unwrap_or(0);
@@ -932,13 +1225,14 @@ pub async fn list_messages(
 )]
 pub async fn get_message(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let message = repo::get_message(&state.db, id)
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown message"))?;
+    ensure_scope(&principal, message.mailbox_id, "Unknown message")?;
     let flag = message_flag::Entity::find_by_id(message.id)
         .one(&state.db)
         .await
@@ -987,13 +1281,14 @@ pub async fn get_message(
 )]
 pub async fn get_message_raw(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let message = repo::get_message(&state.db, id)
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown message"))?;
+    ensure_scope(&principal, message.mailbox_id, "Unknown message")?;
     let bytes = state
         .store
         .get(&message.storage_key)
@@ -1017,13 +1312,17 @@ pub async fn get_message_raw(
 )]
 pub async fn delete_message(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let message = repo::delete_message(&state.db, id)
+    let message = repo::get_message(&state.db, id)
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown message"))?;
+    ensure_scope(&principal, message.mailbox_id, "Unknown message")?;
+    repo::delete_message(&state.db, id)
+        .await
+        .map_err(db_error)?;
 
     if let Err(err) = state.store.delete(&message.storage_key).await {
         tracing::warn!(error = %err, key = %message.storage_key, "failed to remove the stored object");
@@ -1042,11 +1341,11 @@ pub async fn delete_message(
 )]
 pub async fn snooze_message(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
     Json(body): Json<SnoozeRequest>,
 ) -> Result<Response, ApiError> {
-    set_snooze(&state, id, Some(body.snoozed_until)).await
+    set_snooze(&state, &principal, id, Some(body.snoozed_until)).await
 }
 
 #[utoipa::path(
@@ -1058,14 +1357,15 @@ pub async fn snooze_message(
 )]
 pub async fn unsnooze_message(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    set_snooze(&state, id, None).await
+    set_snooze(&state, &principal, id, None).await
 }
 
 async fn set_snooze(
     state: &AppState,
+    principal: &Principal,
     id: Uuid,
     until: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<Response, ApiError> {
@@ -1073,6 +1373,7 @@ async fn set_snooze(
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown message"))?;
+    ensure_scope(principal, message.mailbox_id, "Unknown message")?;
     let existing = message_flag::Entity::find_by_id(id)
         .one(&state.db)
         .await
@@ -1113,12 +1414,12 @@ async fn set_snooze(
 )]
 pub async fn set_message_read(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
     body: Option<Json<FlagRequest>>,
 ) -> Result<Response, ApiError> {
     let read = body.and_then(|Json(body)| body.read).unwrap_or(true);
-    let message = flag_message(&state, id, Some(read), None, None).await?;
+    let message = flag_message(&state, &principal, id, Some(read), None, None).await?;
     Ok(Json(DataResponse { data: message }).into_response())
 }
 
@@ -1132,17 +1433,18 @@ pub async fn set_message_read(
 )]
 pub async fn set_message_starred(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
     body: Option<Json<FlagRequest>>,
 ) -> Result<Response, ApiError> {
     let starred = body.and_then(|Json(body)| body.starred).unwrap_or(true);
-    let message = flag_message(&state, id, None, Some(starred), None).await?;
+    let message = flag_message(&state, &principal, id, None, Some(starred), None).await?;
     Ok(Json(DataResponse { data: message }).into_response())
 }
 
 async fn flag_message(
     state: &AppState,
+    principal: &Principal,
     id: Uuid,
     read: Option<bool>,
     starred: Option<bool>,
@@ -1152,6 +1454,7 @@ async fn flag_message(
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown message"))?;
+    ensure_scope(principal, message.mailbox_id, "Unknown message")?;
     let flag = upsert_flag(state, id, read, starred, folder).await?;
     Ok(MessageResponse::with_flags(message, Some(&flag)))
 }
@@ -1165,7 +1468,7 @@ async fn flag_message(
 )]
 pub async fn bulk_messages(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<BulkRequest>,
 ) -> Result<Response, ApiError> {
     let mut updated = 0usize;
@@ -1174,6 +1477,10 @@ pub async fn bulk_messages(
         let Some(message) = repo::get_message(&state.db, *id).await.map_err(db_error)? else {
             continue;
         };
+        // A session silently skips any id outside its mailbox.
+        if ensure_scope(&principal, message.mailbox_id, "Unknown message").is_err() {
+            continue;
+        }
         match body.action.as_str() {
             "delete" => {
                 repo::delete_message(&state.db, *id)
@@ -1240,13 +1547,14 @@ pub async fn bulk_messages(
 )]
 pub async fn get_message_attachment(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path((id, index)): Path<(Uuid, usize)>,
 ) -> Result<Response, ApiError> {
     let message = repo::get_message(&state.db, id)
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown message"))?;
+    ensure_scope(&principal, message.mailbox_id, "Unknown message")?;
     let raw = state
         .store
         .get(&message.storage_key)
@@ -1287,10 +1595,10 @@ pub async fn get_message_attachment(
 )]
 pub async fn message_counts(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Query(query): Query<MessageQuery>,
 ) -> Result<Response, ApiError> {
-    let items = filtered_messages(&state, &query).await?;
+    let items = filtered_messages(&state, &query, principal.mailbox_scope()).await?;
 
     let mut folders: std::collections::BTreeMap<String, FolderCount> = SYSTEM_FOLDERS
         .iter()
@@ -1375,7 +1683,7 @@ pub async fn message_counts(
 )]
 pub async fn list_folders(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Query(query): Query<MessageQuery>,
 ) -> Result<Response, ApiError> {
     let mut folders: Vec<FolderResponse> = SYSTEM_FOLDERS
@@ -1388,7 +1696,7 @@ pub async fn list_folders(
         })
         .collect();
 
-    if let Some(mailbox_id) = resolve_mailbox(&state, &query).await? {
+    if let Some(mailbox_id) = resolve_mailbox(&state, &query, principal.mailbox_scope()).await? {
         let custom = folder::Entity::find()
             .filter(folder::Column::MailboxId.eq(mailbox_id))
             .order_by_asc(folder::Column::Name)
@@ -1419,7 +1727,7 @@ pub async fn list_folders(
 )]
 pub async fn create_folder(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<CreateFolderRequest>,
 ) -> Result<Response, ApiError> {
     let name = body.name.trim().to_string();
@@ -1431,7 +1739,7 @@ pub async fn create_folder(
         mailbox_id: body.mailbox_id,
         ..MessageQuery::default()
     };
-    let mailbox_id = resolve_mailbox(&state, &query)
+    let mailbox_id = resolve_mailbox(&state, &query, principal.mailbox_scope())
         .await?
         .ok_or_else(|| bad_request("A mailbox is required"))?;
 
@@ -1485,17 +1793,18 @@ pub async fn create_folder(
 )]
 pub async fn message_navigation(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Query(query): Query<MessageQuery>,
 ) -> Result<Response, ApiError> {
-    let entries: Vec<NavigationEntry> = filtered_messages(&state, &query)
-        .await?
-        .into_iter()
-        .map(|(row, flag)| NavigationEntry {
-            id: row.id,
-            unread: !flag.as_ref().map(|flag| flag.read).unwrap_or(false),
-        })
-        .collect();
+    let entries: Vec<NavigationEntry> =
+        filtered_messages(&state, &query, principal.mailbox_scope())
+            .await?
+            .into_iter()
+            .map(|(row, flag)| NavigationEntry {
+                id: row.id,
+                unread: !flag.as_ref().map(|flag| flag.read).unwrap_or(false),
+            })
+            .collect();
     Ok(Json(DataResponse { data: entries }).into_response())
 }
 
@@ -1511,13 +1820,14 @@ pub async fn message_navigation(
 )]
 pub async fn get_message_thread(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let target = repo::get_message(&state.db, id)
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown message"))?;
+    ensure_scope(&principal, target.mailbox_id, "Unknown message")?;
 
     let rows = match target.mailbox_id {
         Some(mailbox_id) => message::Entity::find()
@@ -1580,7 +1890,7 @@ pub async fn get_message_thread(
 )]
 pub async fn empty_folder(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<EmptyRequest>,
 ) -> Result<Response, ApiError> {
     if body.folder != "trash" && body.folder != "spam" {
@@ -1595,7 +1905,7 @@ pub async fn empty_folder(
         ..MessageQuery::default()
     };
 
-    let items = filtered_messages(&state, &query).await?;
+    let items = filtered_messages(&state, &query, principal.mailbox_scope()).await?;
     let mut deleted = 0usize;
     for (row, _) in &items {
         repo::delete_message(&state.db, row.id)
@@ -1763,11 +2073,16 @@ fn draft_response(row: &message::Model, raw: &[u8]) -> DraftResponse {
     }
 }
 
-async fn load_draft(state: &AppState, id: Uuid) -> Result<(message::Model, Vec<u8>), ApiError> {
+async fn load_draft(
+    state: &AppState,
+    principal: &Principal,
+    id: Uuid,
+) -> Result<(message::Model, Vec<u8>), ApiError> {
     let row = repo::get_message(&state.db, id)
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown draft"))?;
+    ensure_scope(principal, row.mailbox_id, "Unknown draft")?;
     let raw = state.store.get(&row.storage_key).await.map_err(internal)?;
     Ok((row, raw))
 }
@@ -1789,6 +2104,7 @@ struct DraftFields<'a> {
 /// Rebuilds and stores a draft object, keeping the row in step.
 async fn write_draft(
     state: &AppState,
+    principal: &Principal,
     id: Uuid,
     fields: DraftFields<'_>,
     attachments: &[OwnedAttachment],
@@ -1813,6 +2129,7 @@ async fn write_draft(
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown draft"))?;
+    ensure_scope(principal, row.mailbox_id, "Unknown draft")?;
     state
         .store
         .put(&row.storage_key, raw.clone())
@@ -1843,7 +2160,7 @@ async fn write_draft(
 )]
 pub async fn create_draft(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<DraftRequest>,
 ) -> Result<Response, ApiError> {
     let mailbox_id = resolve_mailbox(
@@ -1853,6 +2170,7 @@ pub async fn create_draft(
             mailbox_id: body.mailbox_id,
             ..MessageQuery::default()
         },
+        principal.mailbox_scope(),
     )
     .await?;
 
@@ -1863,6 +2181,7 @@ pub async fn create_draft(
                 .await
                 .map_err(db_error)?
                 .ok_or_else(|| not_found("Unknown message"))?;
+            ensure_scope(&principal, source.mailbox_id, "Unknown message")?;
             let source_raw = state
                 .store
                 .get(&source.storage_key)
@@ -1941,10 +2260,10 @@ pub async fn create_draft(
 )]
 pub async fn get_draft(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let (row, raw) = load_draft(&state, id).await?;
+    let (row, raw) = load_draft(&state, &principal, id).await?;
     Ok(Json(DataResponse {
         data: draft_response(&row, &raw),
     })
@@ -1961,15 +2280,16 @@ pub async fn get_draft(
 )]
 pub async fn update_draft(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
     Json(body): Json<DraftRequest>,
 ) -> Result<Response, ApiError> {
-    let (row, current) = load_draft(&state, id).await?;
+    let (row, current) = load_draft(&state, &principal, id).await?;
     // A body change keeps whatever the composer already attached.
     let attachments = owned_attachments(&current);
     let raw = write_draft(
         &state,
+        &principal,
         id,
         DraftFields {
             from: &body.from,
@@ -2005,13 +2325,17 @@ pub async fn update_draft(
 )]
 pub async fn delete_draft(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let row = repo::delete_message(&state.db, id)
+    let row = repo::get_message(&state.db, id)
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown draft"))?;
+    ensure_scope(&principal, row.mailbox_id, "Unknown draft")?;
+    repo::delete_message(&state.db, id)
+        .await
+        .map_err(db_error)?;
     if let Err(err) = state.store.delete(&row.storage_key).await {
         tracing::warn!(error = %err, key = %row.storage_key, "failed to remove the draft object");
     }
@@ -2027,11 +2351,11 @@ pub async fn delete_draft(
 )]
 pub async fn upload_draft_attachments(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
     mut multipart: Multipart,
 ) -> Result<Response, ApiError> {
-    let (row, current) = load_draft(&state, id).await?;
+    let (row, current) = load_draft(&state, &principal, id).await?;
     let mut attachments = owned_attachments(&current);
 
     while let Some(field) = multipart
@@ -2058,6 +2382,7 @@ pub async fn upload_draft_attachments(
     let parsed = body::extract(&current);
     let raw = write_draft(
         &state,
+        &principal,
         id,
         DraftFields {
             from: &row.envelope_from,
@@ -2093,10 +2418,10 @@ pub async fn upload_draft_attachments(
 )]
 pub async fn delete_draft_attachment(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path((id, index)): Path<(Uuid, usize)>,
 ) -> Result<Response, ApiError> {
-    let (row, current) = load_draft(&state, id).await?;
+    let (row, current) = load_draft(&state, &principal, id).await?;
     let mut attachments = owned_attachments(&current);
     if index >= attachments.len() {
         return Err(not_found("Unknown attachment"));
@@ -2106,6 +2431,7 @@ pub async fn delete_draft_attachment(
     let parsed = body::extract(&current);
     let raw = write_draft(
         &state,
+        &principal,
         id,
         DraftFields {
             from: &row.envelope_from,
@@ -2169,9 +2495,9 @@ pub struct SettingRequest {
 
 const SETTINGS_SCOPE: &str = "default";
 
-async fn settings_row(state: &AppState) -> Result<setting::Model, ApiError> {
+async fn settings_row(state: &AppState, scope: &str) -> Result<setting::Model, ApiError> {
     if let Some(row) = setting::Entity::find()
-        .filter(setting::Column::Scope.eq(SETTINGS_SCOPE))
+        .filter(setting::Column::Scope.eq(scope))
         .one(&state.db)
         .await
         .map_err(db_error)?
@@ -2180,7 +2506,7 @@ async fn settings_row(state: &AppState) -> Result<setting::Model, ApiError> {
     }
     setting::ActiveModel {
         id: Set(Uuid::now_v7()),
-        scope: Set(SETTINGS_SCOPE.to_string()),
+        scope: Set(scope.to_string()),
         keyboard_shortcuts_enabled: Set(true),
         show_full_recipient_addresses: Set(false),
         updated_at: Set(chrono::Utc::now()),
@@ -2192,10 +2518,11 @@ async fn settings_row(state: &AppState) -> Result<setting::Model, ApiError> {
 
 async fn update_settings(
     state: &AppState,
+    scope: &str,
     shortcuts: Option<bool>,
     recipient_addresses: Option<bool>,
 ) -> Result<setting::Model, ApiError> {
-    let row = settings_row(state).await?;
+    let row = settings_row(state, scope).await?;
     let mut active: setting::ActiveModel = row.into();
     if let Some(enabled) = shortcuts {
         active.keyboard_shortcuts_enabled = Set(enabled);
@@ -2228,11 +2555,11 @@ fn template_response(row: template::Model) -> TemplateResponse {
 )]
 pub async fn list_templates(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Query(query): Query<MessageQuery>,
 ) -> Result<Response, ApiError> {
     let mut request = template::Entity::find().order_by_asc(template::Column::Title);
-    if let Some(mailbox_id) = resolve_mailbox(&state, &query).await? {
+    if let Some(mailbox_id) = resolve_mailbox(&state, &query, principal.mailbox_scope()).await? {
         request = request.filter(template::Column::MailboxId.eq(mailbox_id));
     }
     let rows = request.all(&state.db).await.map_err(db_error)?;
@@ -2249,7 +2576,7 @@ pub async fn list_templates(
 )]
 pub async fn create_template(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<CreateTemplateRequest>,
 ) -> Result<Response, ApiError> {
     let title = body.title.trim().to_string();
@@ -2263,6 +2590,7 @@ pub async fn create_template(
             mailbox_id: body.mailbox_id,
             ..MessageQuery::default()
         },
+        principal.mailbox_scope(),
     )
     .await?;
 
@@ -2300,7 +2628,7 @@ pub async fn create_template(
 )]
 pub async fn get_template(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let row = template::Entity::find_by_id(id)
@@ -2308,6 +2636,7 @@ pub async fn get_template(
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown template"))?;
+    ensure_scope(&principal, row.mailbox_id, "Unknown template")?;
     Ok(Json(DataResponse {
         data: template_response(row),
     })
@@ -2323,9 +2652,15 @@ pub async fn get_template(
 )]
 pub async fn delete_template(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
+    let row = template::Entity::find_by_id(id)
+        .one(&state.db)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| not_found("Unknown template"))?;
+    ensure_scope(&principal, row.mailbox_id, "Unknown template")?;
     template::Entity::delete_by_id(id)
         .exec(&state.db)
         .await
@@ -2341,9 +2676,9 @@ pub async fn delete_template(
 )]
 pub async fn get_shortcuts_setting(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
 ) -> Result<Response, ApiError> {
-    let row = settings_row(&state).await?;
+    let row = settings_row(&state, settings_scope(&principal)).await?;
     Ok(Json(DataResponse {
         data: SettingResponse {
             enabled: row.keyboard_shortcuts_enabled,
@@ -2361,10 +2696,10 @@ pub async fn get_shortcuts_setting(
 )]
 pub async fn update_shortcuts_setting(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<SettingRequest>,
 ) -> Result<Response, ApiError> {
-    let row = update_settings(&state, Some(body.enabled), None).await?;
+    let row = update_settings(&state, settings_scope(&principal), Some(body.enabled), None).await?;
     Ok(Json(DataResponse {
         data: SettingResponse {
             enabled: row.keyboard_shortcuts_enabled,
@@ -2381,9 +2716,9 @@ pub async fn update_shortcuts_setting(
 )]
 pub async fn get_recipient_addresses_setting(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
 ) -> Result<Response, ApiError> {
-    let row = settings_row(&state).await?;
+    let row = settings_row(&state, settings_scope(&principal)).await?;
     Ok(Json(DataResponse {
         data: SettingResponse {
             enabled: row.show_full_recipient_addresses,
@@ -2401,10 +2736,10 @@ pub async fn get_recipient_addresses_setting(
 )]
 pub async fn update_recipient_addresses_setting(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<SettingRequest>,
 ) -> Result<Response, ApiError> {
-    let row = update_settings(&state, None, Some(body.enabled)).await?;
+    let row = update_settings(&state, settings_scope(&principal), None, Some(body.enabled)).await?;
     Ok(Json(DataResponse {
         data: SettingResponse {
             enabled: row.show_full_recipient_addresses,
@@ -2467,6 +2802,7 @@ async fn contact_mailbox(
     state: &AppState,
     mailbox: &Option<String>,
     mailbox_id: Option<Uuid>,
+    scope: Option<Uuid>,
 ) -> Result<Uuid, ApiError> {
     resolve_mailbox(
         state,
@@ -2475,6 +2811,7 @@ async fn contact_mailbox(
             mailbox_id,
             ..MessageQuery::default()
         },
+        scope,
     )
     .await?
     .ok_or_else(|| bad_request("A mailbox is required"))
@@ -2559,10 +2896,16 @@ async fn upsert_contact(
 )]
 pub async fn get_contact(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Query(query): Query<ContactQuery>,
 ) -> Result<Response, ApiError> {
-    let mailbox_id = contact_mailbox(&state, &query.mailbox, query.mailbox_id).await?;
+    let mailbox_id = contact_mailbox(
+        &state,
+        &query.mailbox,
+        query.mailbox_id,
+        principal.mailbox_scope(),
+    )
+    .await?;
     let row = find_contact(&state, mailbox_id, &query.address)
         .await?
         .ok_or_else(|| not_found("Unknown contact"))?;
@@ -2581,10 +2924,16 @@ pub async fn get_contact(
 )]
 pub async fn update_contact(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<UpdateContactRequest>,
 ) -> Result<Response, ApiError> {
-    let mailbox_id = contact_mailbox(&state, &body.mailbox, body.mailbox_id).await?;
+    let mailbox_id = contact_mailbox(
+        &state,
+        &body.mailbox,
+        body.mailbox_id,
+        principal.mailbox_scope(),
+    )
+    .await?;
     let row = upsert_contact(
         &state,
         mailbox_id,
@@ -2609,10 +2958,16 @@ pub async fn update_contact(
 )]
 pub async fn block_contact(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<BlockContactRequest>,
 ) -> Result<Response, ApiError> {
-    let mailbox_id = contact_mailbox(&state, &body.mailbox, body.mailbox_id).await?;
+    let mailbox_id = contact_mailbox(
+        &state,
+        &body.mailbox,
+        body.mailbox_id,
+        principal.mailbox_scope(),
+    )
+    .await?;
     let row = upsert_contact(&state, mailbox_id, &body.address, None, Some(true), None).await?;
     Ok(Json(DataResponse {
         data: contact_response(&row),
@@ -2628,7 +2983,7 @@ pub async fn block_contact(
 )]
 pub async fn upload_contact_avatar(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     mut multipart: Multipart,
 ) -> Result<Response, ApiError> {
     let mut mailbox_id = None;
@@ -2669,7 +3024,13 @@ pub async fn upload_contact_avatar(
         }
     }
 
-    let mailbox_id = contact_mailbox(&state, &mailbox_address, mailbox_id).await?;
+    let mailbox_id = contact_mailbox(
+        &state,
+        &mailbox_address,
+        mailbox_id,
+        principal.mailbox_scope(),
+    )
+    .await?;
     let address = address.ok_or_else(|| bad_request("An address is required"))?;
     let (bytes, content_type) = full.ok_or_else(|| bad_request("A file is required"))?;
 
@@ -2712,10 +3073,16 @@ pub async fn upload_contact_avatar(
 )]
 pub async fn delete_contact_avatar(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Query(query): Query<ContactQuery>,
 ) -> Result<Response, ApiError> {
-    let mailbox_id = contact_mailbox(&state, &query.mailbox, query.mailbox_id).await?;
+    let mailbox_id = contact_mailbox(
+        &state,
+        &query.mailbox,
+        query.mailbox_id,
+        principal.mailbox_scope(),
+    )
+    .await?;
     let row = find_contact(&state, mailbox_id, &query.address)
         .await?
         .ok_or_else(|| not_found("Unknown contact"))?;
@@ -2759,10 +3126,16 @@ pub async fn delete_contact_avatar(
 )]
 pub async fn get_contact_avatar(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Query(query): Query<ContactQuery>,
 ) -> Result<Response, ApiError> {
-    let mailbox_id = contact_mailbox(&state, &query.mailbox, query.mailbox_id).await?;
+    let mailbox_id = contact_mailbox(
+        &state,
+        &query.mailbox,
+        query.mailbox_id,
+        principal.mailbox_scope(),
+    )
+    .await?;
     let row = find_contact(&state, mailbox_id, &query.address)
         .await?
         .ok_or_else(|| not_found("Unknown contact"))?;
@@ -2792,8 +3165,8 @@ pub async fn get_contact_avatar(
 
 /// Upgrades to a WebSocket that pushes a frame whenever mail is stored.
 ///
-/// The API key is taken from the Authorization header like every other route;
-/// it is never accepted in the query string.
+/// A mailbox session only receives frames for its own mailbox. The API key (or
+/// the session cookie) is taken from the headers like every other route.
 #[utoipa::path(
     get,
     path = "/api/realtime",
@@ -2802,18 +3175,24 @@ pub async fn get_contact_avatar(
 )]
 pub async fn realtime(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    Ok(ws.on_upgrade(move |socket| serve_realtime(socket, state)))
+    let scope = principal.mailbox_scope();
+    Ok(ws.on_upgrade(move |socket| serve_realtime(socket, state, scope)))
 }
 
-async fn serve_realtime(mut socket: WebSocket, state: AppState) {
+async fn serve_realtime(mut socket: WebSocket, state: AppState, scope: Option<Uuid>) {
     let mut events = state.events.subscribe();
     loop {
         tokio::select! {
             received = events.recv() => match received {
                 Ok(frame) => {
+                    if let Some(mailbox_id) = scope
+                        && !frame_belongs_to(&frame, mailbox_id)
+                    {
+                        continue;
+                    }
                     if socket.send(Message::Text(frame.into())).await.is_err() {
                         break;
                     }
@@ -2838,6 +3217,19 @@ async fn serve_realtime(mut socket: WebSocket, state: AppState) {
     }
 }
 
+/// True when a live-update frame is addressed to the given mailbox.
+fn frame_belongs_to(frame: &str, mailbox_id: Uuid) -> bool {
+    serde_json::from_str::<serde_json::Value>(frame)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("mailboxId")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+        })
+        .is_some_and(|id| id == mailbox_id.to_string())
+}
+
 #[utoipa::path(
     get,
     path = "/api/messages/{id}/metadata",
@@ -2850,7 +3242,7 @@ async fn serve_realtime(mut socket: WebSocket, state: AppState) {
 )]
 pub async fn get_message_metadata(
     State(state): State<AppState>,
-    _key: ApiKey,
+    _principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let message = repo::get_message(&state.db, id)
@@ -2896,7 +3288,7 @@ pub async fn get_message_metadata(
 )]
 pub async fn cancel_scheduled_send(
     State(state): State<AppState>,
-    _key: ApiKey,
+    _principal: Principal,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let message = repo::get_message(&state.db, id)
@@ -2937,9 +3329,17 @@ pub async fn cancel_scheduled_send(
 )]
 pub async fn list_mailboxes(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
 ) -> Result<Response, ApiError> {
-    let mailboxes = repo::list_mailboxes(&state.db).await.map_err(db_error)?;
+    // A session sees only its own mailbox; the operator sees every tenant's.
+    let mailboxes = match principal.scope() {
+        Some(scope) => repo::find_mailbox(&state.db, &scope.address)
+            .await
+            .map_err(db_error)?
+            .into_iter()
+            .collect(),
+        None => repo::list_mailboxes(&state.db).await.map_err(db_error)?,
+    };
     let payload = mailboxes.into_iter().map(MailboxResponse::from).collect();
     Ok(ListResponse::new(payload).into_response())
 }
@@ -2957,9 +3357,10 @@ pub async fn list_mailboxes(
 )]
 pub async fn create_mailbox(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<CreateMailbox>,
 ) -> Result<Response, ApiError> {
+    principal.require_operator()?;
     if address::parse(&body.address).is_none() {
         return Err(bad_request("Invalid email address"));
     }
@@ -2967,7 +3368,7 @@ pub async fn create_mailbox(
         return Err(bad_request("Password must not be empty"));
     }
 
-    let mailbox = repo::create_mailbox(&state.db, &body.address, &body.password, &state.secrets)
+    let mailbox = repo::create_mailbox(&state.db, &body.address, &body.password)
         .await
         .map_err(|err| conflict(err.to_string()))?;
 
@@ -2991,9 +3392,10 @@ pub async fn create_mailbox(
 )]
 pub async fn delete_mailbox(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(address): Path<String>,
 ) -> Result<Response, ApiError> {
+    principal.require_operator()?;
     let deleted = repo::delete_mailbox(&state.db, &address)
         .await
         .map_err(db_error)?;
@@ -3016,18 +3418,36 @@ pub async fn delete_mailbox(
 )]
 pub async fn update_mailbox(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(address): Path<String>,
     Json(body): Json<UpdateMailboxRequest>,
 ) -> Result<Response, ApiError> {
-    let mailbox = repo::find_mailbox(&state.db, &address.to_ascii_lowercase())
-        .await
-        .map_err(db_error)?
-        .ok_or_else(|| not_found("Unknown mailbox"))?;
-    let mut active: mailbox::ActiveModel = mailbox.into();
-    active.signature = Set(body.signature);
-    active.updated_at = Set(chrono::Utc::now());
-    let updated = active.update(&state.db).await.map_err(db_error)?;
+    let address = address.to_ascii_lowercase();
+    if let Some(scope) = principal.scope() {
+        // A session may only edit the signature of its own mailbox.
+        if address != scope.address {
+            return Err(not_found("Unknown mailbox"));
+        }
+        if body.password.is_some() || body.quota_bytes.is_some() || body.active.is_some() {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "Forbidden",
+                "A session may only change its own signature",
+            )
+            .code("forbidden"));
+        }
+    }
+    let updated = repo::update_mailbox(
+        &state.db,
+        &address,
+        body.password.as_deref(),
+        body.signature,
+        body.quota_bytes,
+        body.active,
+    )
+    .await
+    .map_err(db_error)?
+    .ok_or_else(|| not_found("Unknown mailbox"))?;
     Ok(Json(DataResponse {
         data: MailboxResponse::from(updated),
     })
@@ -3046,8 +3466,9 @@ pub async fn update_mailbox(
 )]
 pub async fn list_domains(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
 ) -> Result<Response, ApiError> {
+    principal.require_operator()?;
     let domains = repo::list_domains(&state.db).await.map_err(db_error)?;
     let payload = domains.into_iter().map(DomainResponse::from).collect();
     Ok(ListResponse::new(payload).into_response())
@@ -3058,19 +3479,20 @@ pub async fn list_domains(
     path = "/api/domains",
     tag = "domains",
     request_body = CreateDomain,
-    responses((status = 201, description = "Domain created with a DKIM key", body = DomainResponse))
+    responses((status = 201, description = "Domain created", body = DomainResponse))
 )]
 pub async fn create_domain(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<CreateDomain>,
 ) -> Result<Response, ApiError> {
+    principal.require_operator()?;
     let name = body.name.trim().to_ascii_lowercase();
     if name.is_empty() || !name.contains('.') {
         return Err(bad_request("Invalid domain name"));
     }
 
-    let domain = repo::ensure_domain(&state.db, &name, &state.secrets)
+    let domain = repo::ensure_domain(&state.db, &name)
         .await
         .map_err(internal)?;
 
@@ -3085,53 +3507,81 @@ pub async fn create_domain(
 
 #[utoipa::path(
     get,
-    path = "/api/domains/{name}/dkim",
-    tag = "domains",
-    responses(
-        (status = 200, description = "DKIM record to publish in DNS", body = DkimResponse),
-        (status = 404, description = "Unknown domain")
-    )
-)]
-pub async fn domain_dkim(
-    State(state): State<AppState>,
-    _key: ApiKey,
-    Path(name): Path<String>,
-) -> Result<Response, ApiError> {
-    dkim_response(&state, &name).await
-}
-
-/// The same record over POST, which is how the API and README document it.
-#[utoipa::path(
-    post,
-    path = "/api/domains/{name}/dkim",
+    path = "/api/domains/{name}",
     tag = "domains",
     params(("name" = String, Path, description = "Domain name")),
     responses(
-        (status = 200, description = "DKIM record to publish in DNS", body = DkimResponse),
+        (status = 200, description = "One domain", body = DataResponse<DomainResponse>),
         (status = 404, description = "Unknown domain")
     )
 )]
-pub async fn domain_dkim_post(
+pub async fn get_domain(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
-    dkim_response(&state, &name).await
-}
-
-async fn dkim_response(state: &AppState, name: &str) -> Result<Response, ApiError> {
-    let domain = repo::find_domain(&state.db, name)
+    principal.require_operator()?;
+    let domain = repo::find_domain(&state.db, &name)
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown domain"))?;
+    Ok(Json(DataResponse {
+        data: DomainResponse::from(domain),
+    })
+    .into_response())
+}
 
-    let payload = DkimResponse {
-        name: domain.name.clone(),
-        selector: domain.dkim_selector.clone(),
-        record_name: dkim::txt_record_name(&domain.dkim_selector, &domain.name),
-        record_value: dkim::txt_record_value(&domain.dkim_public_key),
-    };
-    Ok((StatusCode::OK, Json(DataResponse { data: payload })).into_response())
+/// Activates or deactivates a whole tenant: a disabled domain stops receiving
+/// (RCPT) and sending (submission AUTH) while its data stays intact.
+#[utoipa::path(
+    patch,
+    path = "/api/domains/{name}",
+    tag = "domains",
+    request_body = UpdateDomainRequest,
+    params(("name" = String, Path, description = "Domain name")),
+    responses(
+        (status = 200, description = "Updated domain", body = DataResponse<DomainResponse>),
+        (status = 404, description = "Unknown domain")
+    )
+)]
+pub async fn update_domain(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(name): Path<String>,
+    Json(body): Json<UpdateDomainRequest>,
+) -> Result<Response, ApiError> {
+    principal.require_operator()?;
+    let domain = repo::set_domain_active(&state.db, &name, body.active)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| not_found("Unknown domain"))?;
+    Ok(Json(DataResponse {
+        data: DomainResponse::from(domain),
+    })
+    .into_response())
+}
+
+/// Removes a tenant domain. Its mailboxes cascade away with it.
+#[utoipa::path(
+    delete,
+    path = "/api/domains/{name}",
+    tag = "domains",
+    params(("name" = String, Path, description = "Domain name")),
+    responses((status = 204, description = "Deleted"), (status = 404, description = "Unknown domain"))
+)]
+pub async fn delete_domain(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    principal.require_operator()?;
+    let deleted = repo::delete_domain(&state.db, &name)
+        .await
+        .map_err(db_error)?;
+    if !deleted {
+        return Err(not_found("Unknown domain"));
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -3150,11 +3600,21 @@ async fn dkim_response(state: &AppState, name: &str) -> Result<Response, ApiErro
 )]
 pub async fn send(
     State(state): State<AppState>,
-    _key: ApiKey,
+    principal: Principal,
     Json(body): Json<SendRequest>,
 ) -> Result<Response, ApiError> {
     if address::parse(&body.from).is_none() {
         return Err(bad_request("Invalid from address"));
+    }
+    if let Some(scope) = principal.scope()
+        && bare_address(&body.from).to_ascii_lowercase() != scope.address
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Forbidden",
+            "A session may only send from its own mailbox",
+        )
+        .code("forbidden"));
     }
     if body.to.is_empty() {
         return Err(bad_request("At least one recipient is required"));
@@ -3190,6 +3650,7 @@ pub async fn send(
                 .await
                 .map_err(db_error)?
                 .ok_or_else(|| not_found("Unknown draft"))?;
+            ensure_scope(&principal, row.mailbox_id, "Unknown draft")?;
             let draft_raw = state.store.get(&row.storage_key).await.map_err(internal)?;
             let attachments = owned_attachments(&draft_raw);
             (Some(row), attachments)

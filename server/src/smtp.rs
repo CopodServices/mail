@@ -284,9 +284,9 @@ impl Session {
             warn!(peer = %self.peer, "AUTH attempted without TLS");
         }
 
-        let mailbox = match repo::find_mailbox(&self.state.db, &username).await {
-            Ok(Some(mailbox)) if mailbox.active => mailbox,
-            Ok(_) => return self.reply(535, 5, 7, 8, "Authentication failed").await,
+        let mailbox = match repo::find_active_mailbox(&self.state.db, &username).await {
+            Ok(Some(mailbox)) => mailbox,
+            Ok(None) => return self.reply(535, 5, 7, 8, "Authentication failed").await,
             Err(err) => {
                 warn!(error = %err, "mailbox lookup failed during AUTH");
                 return self.reply(451, 4, 3, 0, "Temporary failure").await;
@@ -361,8 +361,8 @@ impl Session {
         };
         let normalized = parsed.normalized();
 
-        let mailbox = match repo::find_mailbox(&self.state.db, &normalized).await {
-            Ok(mailbox) => mailbox.filter(|mailbox| mailbox.active),
+        let mailbox = match repo::find_active_mailbox(&self.state.db, &normalized).await {
+            Ok(mailbox) => mailbox,
             Err(err) => {
                 warn!(error = %err, "mailbox lookup failed during RCPT");
                 return self.reply(451, 4, 3, 0, "Temporary failure").await;

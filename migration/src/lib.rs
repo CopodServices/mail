@@ -9,6 +9,7 @@ mod m20261010_000006_templates_settings;
 mod m20261010_000007_contacts;
 mod m20261010_000008_scheduled_send;
 mod m20261010_000009_mailbox_signature;
+mod m20261010_000010_drop_domain_dkim;
 
 pub struct Migrator;
 
@@ -25,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261010_000007_contacts::Migration),
             Box::new(m20261010_000008_scheduled_send::Migration),
             Box::new(m20261010_000009_mailbox_signature::Migration),
+            Box::new(m20261010_000010_drop_domain_dkim::Migration),
         ]
     }
 }

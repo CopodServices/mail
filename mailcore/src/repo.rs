@@ -1,4 +1,3 @@
-use crate::secrets::SecretBox;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use entity::{domain, mailbox, message, outbound_job};
@@ -24,30 +23,105 @@ pub async fn list_domains(db: &DatabaseConnection) -> Result<Vec<domain::Model>>
         .await?)
 }
 
-/// Creates the domain with a fresh DKIM key pair when it does not exist yet.
-pub async fn ensure_domain(
-    db: &DatabaseConnection,
-    name: &str,
-    secrets: &SecretBox,
-) -> Result<domain::Model> {
+/// Creates the domain when it does not exist yet.
+pub async fn ensure_domain(db: &DatabaseConnection, name: &str) -> Result<domain::Model> {
     let name = name.trim().to_ascii_lowercase();
     if let Some(existing) = find_domain(db, &name).await? {
         return Ok(existing);
     }
 
-    let key = crate::dkim::generate_key()?;
     let now = Utc::now();
     let model = domain::ActiveModel {
         id: Set(Uuid::now_v7()),
         name: Set(name),
-        dkim_selector: Set("default".to_string()),
-        dkim_private_key: Set(secrets.encrypt_bytes(&key.private_key)?),
-        dkim_public_key: Set(key.public_key_b64),
         active: Set(true),
         created_at: Set(now),
         updated_at: Set(now),
     };
     Ok(model.insert(db).await?)
+}
+
+/// Finds a mailbox only when both it and its domain are active.
+pub async fn find_active_mailbox(
+    db: &DatabaseConnection,
+    address: &str,
+) -> Result<Option<mailbox::Model>> {
+    let Some(mailbox) = find_mailbox(db, address).await? else {
+        return Ok(None);
+    };
+    if !mailbox.active {
+        return Ok(None);
+    }
+    let domain = domain::Entity::find_by_id(mailbox.domain_id)
+        .one(db)
+        .await?;
+    Ok(domain.filter(|domain| domain.active).map(|_| mailbox))
+}
+
+/// Lists the mailboxes whose address belongs to a domain.
+pub async fn list_mailboxes_in_domain(
+    db: &DatabaseConnection,
+    name: &str,
+) -> Result<Vec<mailbox::Model>> {
+    let Some(domain) = find_domain(db, name).await? else {
+        return Ok(Vec::new());
+    };
+    Ok(mailbox::Entity::find()
+        .filter(mailbox::Column::DomainId.eq(domain.id))
+        .order_by_asc(mailbox::Column::Address)
+        .all(db)
+        .await?)
+}
+
+/// Applies the operator-supplied mailbox fields; absent fields are left alone.
+pub async fn update_mailbox(
+    db: &DatabaseConnection,
+    address: &str,
+    password: Option<&str>,
+    signature: Option<Option<String>>,
+    quota_bytes: Option<i64>,
+    active: Option<bool>,
+) -> Result<Option<mailbox::Model>> {
+    let Some(existing) = find_mailbox(db, address).await? else {
+        return Ok(None);
+    };
+    let mut model: mailbox::ActiveModel = existing.into();
+    if let Some(password) = password {
+        model.password_hash = Set(crate::auth::hash_password(password)?);
+    }
+    if let Some(signature) = signature {
+        model.signature = Set(signature);
+    }
+    if let Some(quota_bytes) = quota_bytes {
+        model.quota_bytes = Set(quota_bytes);
+    }
+    if let Some(active) = active {
+        model.active = Set(active);
+    }
+    model.updated_at = Set(Utc::now());
+    Ok(Some(model.update(db).await?))
+}
+
+pub async fn set_domain_active(
+    db: &DatabaseConnection,
+    name: &str,
+    active: bool,
+) -> Result<Option<domain::Model>> {
+    let Some(existing) = find_domain(db, name).await? else {
+        return Ok(None);
+    };
+    let mut model: domain::ActiveModel = existing.into();
+    model.active = Set(active);
+    model.updated_at = Set(Utc::now());
+    Ok(Some(model.update(db).await?))
+}
+
+pub async fn delete_domain(db: &DatabaseConnection, name: &str) -> Result<bool> {
+    let result = domain::Entity::delete_many()
+        .filter(domain::Column::Name.eq(name.trim().to_ascii_lowercase()))
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected > 0)
 }
 
 pub async fn find_mailbox(
@@ -71,7 +145,6 @@ pub async fn create_mailbox(
     db: &DatabaseConnection,
     address: &str,
     password: &str,
-    secrets: &SecretBox,
 ) -> Result<mailbox::Model> {
     let parsed = crate::address::parse(address)
         .ok_or_else(|| anyhow!("invalid email address: {address}"))?;
@@ -80,7 +153,7 @@ pub async fn create_mailbox(
         return Err(anyhow!("mailbox {normalized} already exists"));
     }
 
-    let parent = ensure_domain(db, &parsed.domain, secrets).await?;
+    let parent = ensure_domain(db, &parsed.domain).await?;
     let now = Utc::now();
     let model = mailbox::ActiveModel {
         id: Set(Uuid::now_v7()),
@@ -95,21 +168,6 @@ pub async fn create_mailbox(
         updated_at: Set(now),
     };
     Ok(model.insert(db).await?)
-}
-
-pub async fn set_mailbox_password(
-    db: &DatabaseConnection,
-    address: &str,
-    password: &str,
-) -> Result<bool> {
-    let Some(existing) = find_mailbox(db, address).await? else {
-        return Ok(false);
-    };
-    let mut active: mailbox::ActiveModel = existing.into();
-    active.password_hash = Set(crate::auth::hash_password(password)?);
-    active.updated_at = Set(Utc::now());
-    active.update(db).await?;
-    Ok(true)
 }
 
 pub async fn delete_mailbox(db: &DatabaseConnection, address: &str) -> Result<bool> {

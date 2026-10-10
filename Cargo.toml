@@ -14,13 +14,13 @@ members = [
 
 [workspace.dependencies]
 anyhow = "1.0.100"
-aes-gcm = "0.10"
 argon2 = "0.5"
 axum = { version = "0.8.6", features = ["macros", "multipart", "ws"] }
 base64 = "0.22"
 chrono = { version = "0.4.42", features = ["serde"] }
 dotenvy = "0.15"
-mail-auth = { version = "0.13", default-features = false, features = ["ring", "generate"] }
+jsonwebtoken = "9"
+mail-auth = { version = "0.13", default-features = false, features = ["ring"] }
 mail-builder = "1.0"
 mail-parser = "0.11"
 object_store = { version = "0.14", features = ["aws"] }

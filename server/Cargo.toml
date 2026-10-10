@@ -14,8 +14,10 @@ base64.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true
 entity = { path = "../entity" }
+jsonwebtoken.workspace = true
 mail-auth.workspace = true
 mailcore = { path = "../mailcore" }
+rand.workspace = true
 rustls.workspace = true
 sea-orm.workspace = true
 serde.workspace = true
