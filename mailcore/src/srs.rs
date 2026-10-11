@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn a_rewritten_sender_round_trips() {
-        let rewritten = encode("tokenscgt@gmail.com", DOMAIN, &secret_key(), NOW).unwrap();
+        let rewritten = encode("alice@remote.test", DOMAIN, &secret_key(), NOW).unwrap();
         assert!(rewritten.starts_with("SRS0="), "{rewritten}");
         assert!(rewritten.ends_with("@example.test"), "{rewritten}");
         // The shape a relay recognises as forwarded mail.
@@ -182,23 +182,23 @@ mod tests {
         assert_eq!(parts[0], "SRS0");
         assert_eq!(parts[1].len(), 4, "{rewritten}");
         assert_eq!(parts[2].len(), 2, "{rewritten}");
-        assert_eq!(parts[3], "gmail.com", "{rewritten}");
-        assert_eq!(parts[4], "tokenscgt", "{rewritten}");
+        assert_eq!(parts[3], "remote.test", "{rewritten}");
+        assert_eq!(parts[4], "alice", "{rewritten}");
         let (local, domain) = rewritten.split_once('@').unwrap();
         assert_eq!(
             decode(local, domain, &secret_key(), NOW).as_deref(),
-            Some("tokenscgt@gmail.com")
+            Some("alice@remote.test")
         );
     }
 
     #[test]
     fn a_local_part_survives_lower_casing_by_a_relay() {
-        let rewritten = encode("tokenscgt@gmail.com", DOMAIN, &secret_key(), NOW).unwrap();
+        let rewritten = encode("alice@remote.test", DOMAIN, &secret_key(), NOW).unwrap();
         let lowercased = rewritten.to_ascii_lowercase();
         let (local, domain) = lowercased.split_once('@').unwrap();
         assert_eq!(
             decode(local, domain, &secret_key(), NOW).as_deref(),
-            Some("tokenscgt@gmail.com")
+            Some("alice@remote.test")
         );
     }
 
@@ -215,14 +215,14 @@ mod tests {
     #[test]
     fn a_forged_or_stale_address_is_refused() {
         let srs_key = secret_key();
-        let rewritten = encode("someone@gmail.com", DOMAIN, &srs_key, NOW).unwrap();
+        let rewritten = encode("alice@remote.test", DOMAIN, &srs_key, NOW).unwrap();
         let (local, domain) = rewritten.split_once('@').unwrap();
         // Another key cannot have written it.
         assert!(decode(local, domain, &key("other-secret"), NOW).is_none());
         // Another domain cannot claim it.
         assert!(decode(local, "elsewhere.test", &srs_key, NOW).is_none());
         // A swapped sender fails the hash.
-        let forged = local.replace("someone", "someoneelse");
+        let forged = local.replace("alice", "mallory");
         assert!(decode(&forged, domain, &srs_key, NOW).is_none());
         // And it expires.
         let later = NOW + 30 * 86_400;

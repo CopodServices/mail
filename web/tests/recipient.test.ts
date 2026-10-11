@@ -16,8 +16,8 @@ import {
 
 describe("recipient completion", () => {
 	test("a bare mailbox name takes the sender's domain", () => {
-		expect(completeRecipientEntry("imsamuel160", "mandalakarya.test")).toBe(
-			"imsamuel160@mandalakarya.test",
+		expect(completeRecipientEntry("alice", "example.test")).toBe(
+			"alice@example.test",
 		);
 		expect(parseRecipientEntries("maya", [], "example.test")).toEqual([
 			"maya@example.test",
@@ -61,16 +61,16 @@ describe("recipient completion", () => {
 	});
 
 	test("a completed address is valid where the bare name was not", () => {
-		expect(isValidRecipient("imsamuel160")).toBe(false);
-		expect(isValidRecipient("imsamuel160@mandalakarya.test")).toBe(true);
+		expect(isValidRecipient("alice")).toBe(false);
+		expect(isValidRecipient("alice@example.test")).toBe(true);
 	});
 });
 
 describe("recipient chip labels", () => {
 	test("the sender's own domain drops to the mailbox name", () => {
-		expect(
-			getRecipientLabel("imsamuel160@mandalakarya.test", "Mandalakarya.test"),
-		).toBe("imsamuel160");
+		expect(getRecipientLabel("alice@example.test", "Example.test")).toBe(
+			"alice",
+		);
 	});
 
 	test("another domain keeps the whole address", () => {

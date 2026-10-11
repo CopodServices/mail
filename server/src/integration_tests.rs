@@ -1467,7 +1467,7 @@ async fn saving_a_job_records_the_envelope_it_was_given() {
         outbound_job::ActiveModel {
             id: Set(id),
             mailbox_id: Set(Some(mailbox.id)),
-            envelope_from: Set(format!("SRS0=AAAA=11=gmail.com=someone@{domain}")),
+            envelope_from: Set(format!("SRS0=AAAA=11=remote.test=someone@{domain}")),
             recipients: Set(serde_json::json!(["dest@remote.test"])),
             storage_key: Set(format!("fixtures/job-{id}")),
             message_id: Set(None),
