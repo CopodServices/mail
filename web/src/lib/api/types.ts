@@ -29,6 +29,16 @@ export type MessageNavigationEntry = {
 	unread: boolean;
 };
 
+/** The neighbours and position of an open message, from GET /api/messages/{id}/neighbors. */
+export type MessageNeighbors = {
+	previous_id: string | null;
+	next_id: string | null;
+	position: number;
+	total: number;
+	unread_position: number;
+	unread_total: number;
+};
+
 /** The mailbox behind a signed-in webmail session. */
 export type SessionMailbox = {
 	mailbox_id: string;

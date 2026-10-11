@@ -2,32 +2,19 @@
 
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useRouter } from "next/navigation";
-import {
-	createContext,
-	useCallback,
-	useContext,
-	useEffect,
-	useState,
-} from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { useLanguage } from "@/components/language-provider";
 import { useSelectedMailbox } from "@/components/mailbox-provider";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { apiFetch } from "@/lib/api/client";
-import type { MessageNavigationEntry } from "@/lib/api/types";
+import type { MessageNeighbors } from "@/lib/api/types";
 import { messageHref } from "@/lib/mail-routes";
 import type {
 	MessageDetailNavigationContextValue,
 	MessageDetailNavigationProps,
 	MessageDetailNavigationProviderProps,
-	MessageDetailNavigationSnapshot,
-	OpenedUnreadMessages,
 } from "./message-detail-navigation-types";
-import {
-	getMessageDetailNavigationState,
-	takeOpenedUnreadMessage,
-} from "./message-detail-navigation-utils";
-import { useConversationView } from "./use-conversation-view";
 
 const NavigationContext =
 	createContext<MessageDetailNavigationContextValue | null>(null);
@@ -36,85 +23,23 @@ export function MessageDetailNavigationProvider({
 	children,
 	config,
 }: MessageDetailNavigationProviderProps) {
-	const { selectedMailbox, isLoading: mailboxesLoading } = useSelectedMailbox();
-	const [conversationView] = useConversationView();
-	const grouped = conversationView && config.folder !== "drafts";
-	const mailboxId = selectedMailbox?.id;
-	const key = `${config.folder}:${config.folderId ?? ""}:${mailboxId ?? "all"}:${grouped}`;
-	const [snapshot, setSnapshot] = useState<MessageDetailNavigationSnapshot>({
-		key: "",
-		entries: [],
-	});
-	const [openedUnread, setOpenedUnread] = useState<OpenedUnreadMessages>({
-		key: "",
-		ids: new Set(),
-	});
-	const recordUnread = useCallback(
-		(messageId: string) => {
-			setOpenedUnread((current) => {
-				const ids = new Set(current.key === key ? current.ids : []);
-				ids.add(messageId);
-				return { key, ids };
-			});
-		},
-		[key],
-	);
-
-	useEffect(() => {
-		const messageId = takeOpenedUnreadMessage();
-		if (messageId) recordUnread(messageId);
-	}, [recordUnread]);
-
-	useEffect(() => {
-		if (mailboxesLoading) return;
-		let cancelled = false;
-		// The API filters by folder; custom folders travel as their folder id.
-		const params = new URLSearchParams({
-			folder: config.folderId ?? config.folder,
-		});
-		if (mailboxId) params.set("mailbox_id", mailboxId);
-		void apiFetch(`/api/messages/navigation?${params.toString()}`)
-			.then((response) => {
-				if (!response.ok) throw new Error("Unable to load message navigation");
-				return response.json() as Promise<{
-					data?: MessageNavigationEntry[];
-				}>;
-			})
-			.then((response) => {
-				if (!cancelled) setSnapshot({ key, entries: response.data ?? [] });
-			})
-			.catch(() => {
-				if (!cancelled) setSnapshot({ key, entries: [] });
-			});
-		return () => {
-			cancelled = true;
-		};
-	}, [
-		config.folder,
-		config.folderId,
-		grouped,
-		key,
-		mailboxId,
-		mailboxesLoading,
-	]);
-
-	const unreadIds = openedUnread.key === key ? openedUnread.ids : null;
-	const entries =
-		snapshot.key === key
-			? snapshot.entries.map((entry) => ({
-					...entry,
-					unread: entry.unread || !!unreadIds?.has(entry.id),
-				}))
-			: [];
 	return (
 		<NavigationContext.Provider
-			value={{ entries, hrefPrefix: config.hrefPrefix, recordUnread }}
+			value={{
+				folder: config.folder,
+				folderId: config.folderId ?? null,
+				hrefPrefix: config.hrefPrefix,
+			}}
 		>
 			{children}
 		</NavigationContext.Provider>
 	);
 }
 
+/**
+ * The newer and older neighbours of the open message and its unread position,
+ * read from the API one message at a time instead of the whole folder.
+ */
 export function MessageDetailNavigation({
 	messageId,
 	unread,
@@ -122,12 +47,40 @@ export function MessageDetailNavigation({
 	const { t } = useLanguage();
 	const context = useContext(NavigationContext);
 	const router = useRouter();
+	const { selectedMailbox, isLoading: mailboxesLoading } = useSelectedMailbox();
+	const [neighbors, setNeighbors] = useState<MessageNeighbors | null>(null);
+
+	const folder = context?.folderId ?? context?.folder ?? null;
+	const mailboxId = selectedMailbox?.id;
 	useEffect(() => {
-		if (unread) context?.recordUnread(messageId);
-	}, [context?.recordUnread, messageId, unread]);
+		if (mailboxesLoading || !folder) return;
+		let cancelled = false;
+		const params = new URLSearchParams({ folder });
+		if (mailboxId) params.set("mailbox_id", mailboxId);
+		// Opening the message marks it read; telling the API how the reader sees
+		// it keeps the unread position from moving under them.
+		if (unread) params.set("unread", "true");
+		void apiFetch(`/api/messages/${messageId}/neighbors?${params.toString()}`)
+			.then((response) => {
+				if (!response.ok) throw new Error("Unable to load message navigation");
+				return response.json() as Promise<{ data?: MessageNeighbors }>;
+			})
+			.then((payload) => {
+				if (!cancelled) setNeighbors(payload.data ?? null);
+			})
+			.catch(() => {
+				if (!cancelled) setNeighbors(null);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [folder, mailboxId, mailboxesLoading, messageId, unread]);
+
 	if (!context) return null;
-	const { previousId, nextId, unreadOrder, totalUnread } =
-		getMessageDetailNavigationState(context.entries, messageId);
+	const previousId = neighbors?.previous_id ?? null;
+	const nextId = neighbors?.next_id ?? null;
+	const totalUnread = neighbors?.unread_total ?? 0;
+	const unreadOrder = neighbors?.unread_position ?? 0;
 
 	return (
 		<div className="ml-auto flex shrink-0 items-center gap-2 text-neutral-500">
