@@ -48,6 +48,10 @@ export function useMessagePolling(): MessageRealtimeState {
 		let connected = false;
 		let leader = false;
 		let stopped = false;
+		// The first connect is covered by each view's own initial load; only a
+		// later connect can have missed frames, so only then does the client ask
+		// every view to refresh.
+		let hasConnected = false;
 
 		function dispatchMessagesChanged() {
 			window.dispatchEvent(
@@ -145,7 +149,8 @@ export function useMessagePolling(): MessageRealtimeState {
 				reconnectAttempt = 0;
 				revision = null;
 				setConnected(true);
-				dispatchMessagesChanged();
+				if (hasConnected) dispatchMessagesChanged();
+				hasConnected = true;
 				sendHeartbeat();
 				heartbeatTimer = window.setInterval(
 					sendHeartbeat,
@@ -193,8 +198,9 @@ export function useMessagePolling(): MessageRealtimeState {
 					connected,
 				} satisfies RealtimeChannelMessage);
 			} else if (message?.type === "status" && !leader) {
+				const wasConnected = connected;
 				setConnected(message.connected);
-				if (message.connected) dispatchMessagesChanged();
+				if (message.connected && !wasConnected) dispatchMessagesChanged();
 			} else if (message?.type === "notification" && !leader) {
 				handleNotification(message.payload, false);
 			} else if (message?.type === "refresh") {

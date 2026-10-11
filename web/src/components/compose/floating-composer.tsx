@@ -1,8 +1,19 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { usePathname, useRouter } from "next/navigation";
 import { useCompose } from "@/components/compose/compose-context";
-import { ComposeForm } from "@/components/compose/compose-form";
+
+// The composer carries the rich-text editor and the HTML sanitizer, which the
+// app only needs once a draft is opened. Loading it on demand keeps that stack
+// out of every page's initial bundle instead of shipping it with the layout.
+const ComposeForm = dynamic(
+	() =>
+		import("@/components/compose/compose-form").then((module) => ({
+			default: module.ComposeForm,
+		})),
+	{ ssr: false },
+);
 
 export function FloatingComposer() {
 	const { open, draftId, closeComposer } = useCompose();

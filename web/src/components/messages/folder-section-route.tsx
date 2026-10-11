@@ -1,11 +1,23 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import { type ReactNode, Suspense } from "react";
-import { MessageDetailView } from "./message-detail/message-detail-view";
+import { MessageDetailSkeleton } from "@/components/page-skeletons";
 import { MessageFolderPage } from "./message-folder-page";
 import { MessageSplitLayout } from "./message-split-layout";
 import type { MessageFolderConfig } from "./types";
+
+// The reading stack (conversation thread, attachments and the HTML sanitizer)
+// is heavy and only needed once a message is opened, so it loads on demand
+// instead of shipping with every folder list.
+const MessageDetailView = dynamic(
+	() =>
+		import("./message-detail/message-detail-view").then((module) => ({
+			default: module.MessageDetailView,
+		})),
+	{ ssr: false, loading: () => <MessageDetailSkeleton /> },
+);
 
 type Props = {
 	config: MessageFolderConfig;
