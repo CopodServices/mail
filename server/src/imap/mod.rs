@@ -8,10 +8,14 @@ mod fetch;
 mod search;
 mod wire;
 
+/// How many stored messages a SEARCH loads at once.
+const SEARCH_CONCURRENCY: usize = 8;
+
 use crate::delivery;
 use crate::state::AppState;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use entity::{folder, mailbox, message, message_flag};
+use futures_util::StreamExt;
 use mailcore::policy::AuthOutcome;
 use mailcore::query::{self, FolderEntry};
 use mailcore::stream::{Conn, InboundStream};
@@ -787,27 +791,45 @@ impl Session {
         let entries = self.entries().await?;
         let draft = self.selected_is_drafts();
         let mut hits: Vec<u32> = Vec::new();
-        for (index, entry) in entries.iter().enumerate() {
+        let mut needs_body: Vec<(u32, FolderEntry)> = Vec::new();
+        for (index, entry) in entries.into_iter().enumerate() {
             let sequence = (index + 1) as u32;
             let value = if uid_mode { entry.uid as u32 } else { sequence };
-            match search::evaluate(&criterion, entry, None, draft) {
+            match search::evaluate(&criterion, &entry, None, draft) {
                 Some(true) => hits.push(value),
                 Some(false) => {}
-                None => {
-                    let raw = self
-                        .state
-                        .store
-                        .get(&entry.storage_key)
-                        .await
-                        .map_err(io_err)?;
-                    let parsed = mail_parser::MessageParser::default()
-                        .parse(&raw)
-                        .map(|message| message.into_owned());
-                    if search::evaluate(&criterion, entry, parsed.as_ref(), draft) == Some(true) {
-                        hits.push(value);
-                    }
-                }
+                None => needs_body.push((value, entry)),
             }
+        }
+        // Criteria the headers cannot answer need the stored message. Load a
+        // bounded number at once rather than one round trip after another.
+        if !needs_body.is_empty() {
+            let store = self.state.store.clone();
+            let criterion = std::sync::Arc::new(criterion);
+            let mut loaded: Vec<(u32, bool)> =
+                futures_util::stream::iter(needs_body.into_iter().map(|(value, entry)| {
+                    let store = store.clone();
+                    let criterion = criterion.clone();
+                    async move {
+                        let Ok(raw) = store.get(&entry.storage_key).await else {
+                            return (value, false);
+                        };
+                        let parsed = mail_parser::MessageParser::default()
+                            .parse(&raw)
+                            .map(|message| message.into_owned());
+                        (
+                            value,
+                            search::evaluate(&criterion, &entry, parsed.as_ref(), draft)
+                                == Some(true),
+                        )
+                    }
+                }))
+                .buffer_unordered(SEARCH_CONCURRENCY)
+                .collect()
+                .await;
+            loaded.retain(|(_, hit)| *hit);
+            hits.extend(loaded.into_iter().map(|(value, _)| value));
+            hits.sort_unstable();
         }
         let list: Vec<String> = hits.iter().map(u32::to_string).collect();
         let label = if uid_mode { "SEARCH UID" } else { "SEARCH" };

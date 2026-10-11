@@ -103,7 +103,7 @@ impl MessageFilters {
         {
             let index = clause.bind(format!("%{text}%").into());
             clause.and(format!(
-                "(m.subject LIKE ${index} OR m.envelope_from LIKE ${index} OR m.envelope_to LIKE ${index})"
+                "(m.subject ILIKE ${index} OR m.envelope_from ILIKE ${index} OR m.envelope_to ILIKE ${index})"
             ));
         }
         // Starred is a flag view, not a folder a message is moved into.

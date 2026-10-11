@@ -3384,6 +3384,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "entity",
+ "futures-util",
  "http-body-util",
  "jsonwebtoken",
  "mail-auth",
