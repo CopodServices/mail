@@ -962,7 +962,23 @@ pub struct AttachmentResponse {
     pub index: usize,
     pub filename: Option<String>,
     pub content_type: Option<String>,
+    /// Content-ID of an inline part, the value a body's cid: reference names.
+    pub content_id: Option<String>,
     pub size_bytes: i64,
+}
+
+impl AttachmentResponse {
+    /// The response for one MIME part of a stored message. The position doubles
+    /// as the id the client fetches the bytes by.
+    fn from_part(index: usize, attachment: &body::Attachment) -> Self {
+        Self {
+            index,
+            filename: attachment.filename.clone(),
+            content_type: attachment.content_type.clone(),
+            content_id: attachment.content_id.clone(),
+            size_bytes: attachment.bytes.len() as i64,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1341,22 +1357,13 @@ pub async fn get_message(
         .one(&state.db)
         .await
         .map_err(db_error)?;
-    let raw = state
-        .store
-        .get(&message.storage_key)
-        .await
-        .map_err(internal)?;
+    let raw = read_stored(&state, &message.storage_key).await?;
     let parsed = body::extract(&raw);
     let attachments = parsed
         .attachments
         .iter()
         .enumerate()
-        .map(|(index, attachment)| AttachmentResponse {
-            index,
-            filename: attachment.filename.clone(),
-            content_type: attachment.content_type.clone(),
-            size_bytes: attachment.bytes.len() as i64,
-        })
+        .map(|(index, attachment)| AttachmentResponse::from_part(index, attachment))
         .collect();
 
     Ok((
@@ -1397,16 +1404,44 @@ pub async fn get_message_raw(
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown message"))?;
     ensure_scope(&principal, message.mailbox_id, "Unknown message")?;
-    let bytes = state
-        .store
-        .get(&message.storage_key)
-        .await
-        .map_err(internal)?;
+    let bytes = read_stored(&state, &message.storage_key).await?;
 
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "message/rfc822")
         .body(Body::from(bytes))
         .expect("valid response"))
+}
+
+/// Reads a stored message, telling a copy object storage no longer holds (410)
+/// apart from object storage being unreachable (500).
+async fn read_stored(state: &AppState, key: &str) -> Result<Vec<u8>, ApiError> {
+    state.store.get(key).await.map_err(|err| {
+        if store::is_missing(&err) {
+            ApiError::new(
+                StatusCode::GONE,
+                "Gone",
+                "The stored copy of this message is no longer in object storage",
+            )
+            .code("message_unavailable")
+        } else {
+            internal(err)
+        }
+    })
+}
+
+/// Removes a stored copy, retrying once and logging loudly when it is still
+/// there: the row is gone by then, so an object left behind is invisible.
+async fn purge_object(state: &AppState, key: &str) {
+    if let Err(err) = state.store.delete(key).await {
+        tracing::warn!(error = %err, key, "failed to remove the stored object; retrying");
+        if let Err(err) = state.store.delete(key).await {
+            tracing::error!(
+                error = %err,
+                key,
+                "orphaned object: the stored copy could not be removed"
+            );
+        }
+    }
 }
 
 #[utoipa::path(
@@ -1432,9 +1467,7 @@ pub async fn delete_message(
         .await
         .map_err(db_error)?;
 
-    if let Err(err) = state.store.delete(&message.storage_key).await {
-        tracing::warn!(error = %err, key = %message.storage_key, "failed to remove the stored object");
-    }
+    purge_object(&state, &message.storage_key).await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1753,11 +1786,7 @@ pub async fn get_message_attachment(
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown message"))?;
     ensure_scope(&principal, message.mailbox_id, "Unknown message")?;
-    let raw = state
-        .store
-        .get(&message.storage_key)
-        .await
-        .map_err(internal)?;
+    let raw = read_stored(&state, &message.storage_key).await?;
     let parsed = body::extract(&raw);
     let attachment = parsed
         .attachments
@@ -2033,18 +2062,20 @@ pub async fn get_message_thread(
     for row in members {
         let id = row.id;
         let flag = flags.iter().find(|flag| flag.message_id == row.id);
-        let raw = state.store.get(&row.storage_key).await.map_err(internal)?;
-        let parsed = body::extract(&raw);
+        // A member whose stored copy is gone still shows, with an empty body,
+        // rather than failing the whole conversation.
+        let parsed = match read_stored(&state, &row.storage_key).await {
+            Ok(raw) => body::extract(&raw),
+            Err(_) => {
+                tracing::warn!(key = %row.storage_key, "thread member has no stored copy");
+                body::Body::default()
+            }
+        };
         let attachments = parsed
             .attachments
             .iter()
             .enumerate()
-            .map(|(index, attachment)| AttachmentResponse {
-                index,
-                filename: attachment.filename.clone(),
-                content_type: attachment.content_type.clone(),
-                size_bytes: attachment.bytes.len() as i64,
-            })
+            .map(|(index, attachment)| AttachmentResponse::from_part(index, attachment))
             .collect();
         messages.push(ThreadMessageResponse {
             message: MessageResponse::with_flags(row, flag, extras.remove(&id).unwrap_or_default()),
@@ -2232,12 +2263,7 @@ fn attachment_responses(raw: &[u8]) -> Vec<AttachmentResponse> {
         .attachments
         .iter()
         .enumerate()
-        .map(|(index, attachment)| AttachmentResponse {
-            index,
-            filename: attachment.filename.clone(),
-            content_type: attachment.content_type.clone(),
-            size_bytes: attachment.bytes.len() as i64,
-        })
+        .map(|(index, attachment)| AttachmentResponse::from_part(index, attachment))
         .collect()
 }
 
@@ -3490,22 +3516,13 @@ pub async fn get_message_metadata(
         .await
         .map_err(db_error)?
         .ok_or_else(|| not_found("Unknown message"))?;
-    let raw = state
-        .store
-        .get(&message.storage_key)
-        .await
-        .map_err(internal)?;
+    let raw = read_stored(&state, &message.storage_key).await?;
     let parsed = body::extract(&raw);
     let attachments = parsed
         .attachments
         .iter()
         .enumerate()
-        .map(|(index, attachment)| AttachmentResponse {
-            index,
-            filename: attachment.filename.clone(),
-            content_type: attachment.content_type.clone(),
-            size_bytes: attachment.bytes.len() as i64,
-        })
+        .map(|(index, attachment)| AttachmentResponse::from_part(index, attachment))
         .collect();
 
     Ok(Json(DataResponse {
@@ -3646,12 +3663,41 @@ pub async fn delete_mailbox(
     Path(address): Path<String>,
 ) -> Result<Response, ApiError> {
     principal.require_operator()?;
-    let deleted = repo::delete_mailbox(&state.db, &address)
+    let Some(mailbox) = repo::find_mailbox(&state.db, &address)
+        .await
+        .map_err(db_error)?
+    else {
+        return Err(not_found("Unknown mailbox"));
+    };
+    // A mailbox takes its messages and its queued copies with it: a message row's
+    // mailbox is nullable, so leaving them behind would hide them from every
+    // reader while their objects stay in the bucket.
+    let messages = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox.id))
+        .all(&state.db)
         .await
         .map_err(db_error)?;
-    if !deleted {
-        return Err(not_found("Unknown mailbox"));
+    for row in &messages {
+        purge_object(&state, &row.storage_key).await;
+        repo::delete_message(&state.db, row.id)
+            .await
+            .map_err(db_error)?;
     }
+    let jobs = outbound_job::Entity::find()
+        .filter(outbound_job::Column::MailboxId.eq(mailbox.id))
+        .all(&state.db)
+        .await
+        .map_err(db_error)?;
+    for job in &jobs {
+        purge_object(&state, &job.storage_key).await;
+        outbound_job::Entity::delete_by_id(job.id)
+            .exec(&state.db)
+            .await
+            .map_err(db_error)?;
+    }
+    repo::delete_mailbox(&state.db, &address)
+        .await
+        .map_err(db_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

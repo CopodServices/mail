@@ -60,6 +60,18 @@ impl MailStore {
     }
 }
 
+/// True when object storage says the object is not there: a fact about the key,
+/// not a failure to reach the store. A read of a copy that is gone is the
+/// reader's answer for a message whose bytes no longer exist, not an outage.
+pub fn is_missing(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<object_store::Error>(),
+            Some(object_store::Error::NotFound { .. })
+        )
+    })
+}
+
 /// Storage key for a message delivered into a mailbox.
 pub fn inbound_key(
     domain: &str,

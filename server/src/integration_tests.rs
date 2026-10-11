@@ -1587,6 +1587,13 @@ async fn preview_serves_only_renderable_attachments_inline() {
         "Content-Disposition: attachment; filename=doc.pdf\r\n",
         "\r\n",
         "%PDF-1.4\r\n",
+        "--xyz\r\n",
+        "Content-Type: image/png; name=logo.png\r\n",
+        "Content-Disposition: inline; filename=logo.png\r\n",
+        "Content-Transfer-Encoding: base64\r\n",
+        "Content-ID: <logo@remote.test>\r\n",
+        "\r\n",
+        "aGk=\r\n",
         "--xyz--\r\n",
     )
     .as_bytes()
@@ -1640,12 +1647,45 @@ async fn preview_serves_only_renderable_attachments_inline() {
         }
     };
 
+    let detail = |uri: String| {
+        let app = crate::api::router(state.clone());
+        async move {
+            let request = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice::<serde_json::Value>(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+    };
+
     // The PDF previews in place; the same part downloads without the query.
     let (status, disposition, content_type) =
         fetch(format!("/api/messages/{id}/attachments/1?preview=1")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(disposition.starts_with("inline"), "{disposition}");
     assert_eq!(content_type, "application/pdf");
+
+    // The inline image previews too, and the message detail names the part its
+    // cid: reference points at, so the reader can draw it in place.
+    let (status, disposition, content_type) =
+        fetch(format!("/api/messages/{id}/attachments/2?preview=1")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(disposition.starts_with("inline"), "{disposition}");
+    assert_eq!(content_type, "image/png");
+
+    let body = detail(format!("/api/messages/{id}")).await;
+    let parts = body["data"]["attachments"].as_array().unwrap();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[2]["content_id"], "logo@remote.test");
+    assert!(parts[0]["content_id"].is_null(), "{parts:?}");
 
     let (_, disposition, _) = fetch(format!("/api/messages/{id}/attachments/1")).await;
     assert!(disposition.starts_with("attachment"), "{disposition}");
@@ -1755,6 +1795,148 @@ async fn set_flag(
     .insert(db)
     .await
     .unwrap();
+}
+
+/// Deleting a mailbox takes its messages and their stored copies with it: a
+/// message row's mailbox is nullable, so leaving them behind would hide them
+/// from every reader while their objects stayed in the bucket.
+#[tokio::test]
+async fn deleting_a_mailbox_takes_its_messages_and_objects() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let config = Arc::new(test_config());
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let store = MailStore::new(&config.s3).expect("object store");
+
+    let domain = format!("mailbox-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let address = format!("gone@{domain}");
+    let mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
+
+    let id = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Stored,
+        5,
+    )
+    .await;
+    let key = format!("fixtures/{id}.eml");
+    store.put(&key, b"message bytes".to_vec()).await.unwrap();
+
+    let state = AppState {
+        db: db.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        authenticator: None,
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+    let response = crate::api::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/mailboxes/{address}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let rows = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox.id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "the messages went with the mailbox");
+    assert!(
+        store.get(&key).await.is_err(),
+        "and so did their stored copies"
+    );
+
+    let _ = repo::delete_mailbox(&db, &address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
+/// A message whose stored copy is gone answers 410, not a 500 from object
+/// storage, so the reader can call the mail unavailable rather than broken.
+#[tokio::test]
+async fn a_message_without_its_object_reads_as_gone() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let config = Arc::new(test_config());
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let store = MailStore::new(&config.s3).expect("object store");
+
+    let domain = format!("gone-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let address = format!("inbox@{domain}");
+    let mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
+
+    // A row whose object was never written, as an interrupted delivery leaves.
+    let id = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Stored,
+        3,
+    )
+    .await;
+
+    let state = AppState {
+        db: db.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        authenticator: None,
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+    let response = crate::api::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/messages/{id}/raw"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::GONE,
+        "a copy that is gone is not an outage"
+    );
+
+    let _ = repo::delete_message(&db, id).await;
+    let _ = repo::delete_mailbox(&db, &address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
 }
 
 /// The raw bytes of the one message a mailbox owns, for asserting on headers.
