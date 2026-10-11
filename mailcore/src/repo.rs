@@ -174,6 +174,26 @@ pub async fn mailbox_usage_bytes(db: &DatabaseConnection, mailbox_id: Uuid) -> R
     Ok(usage.and_then(|usage| usage.used_bytes).unwrap_or(0))
 }
 
+/// Adjusts the running byte total kept on the mailbox row.
+pub async fn add_mailbox_usage(
+    db: &DatabaseConnection,
+    mailbox_id: Uuid,
+    delta: i64,
+) -> Result<()> {
+    if delta == 0 {
+        return Ok(());
+    }
+    mailbox::Entity::update_many()
+        .col_expr(
+            mailbox::Column::UsedBytes,
+            Expr::col(mailbox::Column::UsedBytes).add(delta),
+        )
+        .filter(mailbox::Column::Id.eq(mailbox_id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
 /// Bytes stored for every mailbox that holds at least one message.
 pub async fn mailbox_usage_totals(db: &DatabaseConnection) -> Result<HashMap<Uuid, i64>> {
     #[derive(FromQueryResult)]
@@ -230,6 +250,7 @@ pub async fn create_mailbox(
         display_name: Set(None),
         forward_to: Set(None),
         quota_bytes: Set(0),
+        used_bytes: Set(0),
         active: Set(true),
         created_at: Set(now),
         updated_at: Set(now),
@@ -353,6 +374,9 @@ pub async fn delete_message(db: &DatabaseConnection, id: Uuid) -> Result<Option<
         return Ok(None);
     };
     message::Entity::delete_by_id(id).exec(db).await?;
+    if let Some(mailbox_id) = existing.mailbox_id {
+        add_mailbox_usage(db, mailbox_id, -existing.size_bytes).await?;
+    }
     Ok(Some(existing))
 }
 

@@ -3,9 +3,8 @@
 //! crate. It learns from user feedback and scores in constant time.
 
 use crate::spam::config::ClassifierConfig;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use xxhash_rust::xxh3::xxh3_64;
 
 const MAX_GRAD: f32 = 1e4;
@@ -18,7 +17,7 @@ const STOPWORDS: &[&str] = &[
     "about", "after", "also", "when", "what", "which", "how", "why", "its", "it's",
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Classifier {
     hash_mask: u64,
     alpha: f32,
@@ -74,15 +73,13 @@ impl Classifier {
         }
     }
 
+    /// The distinct feature indices with their hash signs, in index order.
+    /// Sorting beats a hash set here: one allocation, no hashing, stable order.
     fn unique(&self, tokens: &[String]) -> Vec<(usize, f32)> {
-        let mut seen = HashSet::new();
-        let mut features = Vec::new();
-        for token in tokens {
-            let (idx, sign) = self.feature(token);
-            if seen.insert(idx) {
-                features.push((idx, sign));
-            }
-        }
+        let mut features: Vec<(usize, f32)> =
+            tokens.iter().map(|token| self.feature(token)).collect();
+        features.sort_unstable_by_key(|(idx, _)| *idx);
+        features.dedup_by_key(|(idx, _)| *idx);
         features
     }
 
@@ -119,13 +116,80 @@ impl Classifier {
         self.trained += 1;
     }
 
+    /// A compact little-endian blob of the parameter and accumulator arrays.
+    /// JSON would cost tens of megabytes per model and a heap of formatting.
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_default()
+        let mut out = Vec::with_capacity(16 + (self.z.len() + self.n.len()) * 4);
+        out.extend_from_slice(&(self.z.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.trained.to_le_bytes());
+        for value in [
+            self.alpha,
+            self.beta,
+            self.l1,
+            self.l2,
+            self.bias_z,
+            self.bias_n,
+        ] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in &self.z {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in &self.n {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        serde_json::from_slice(bytes).ok()
+        let mut offset = 0usize;
+        let size = read_u32(bytes, &mut offset)? as usize;
+        let trained = read_u64(bytes, &mut offset)?;
+        let (alpha, beta) = (read_f32(bytes, &mut offset)?, read_f32(bytes, &mut offset)?);
+        let (l1, l2) = (read_f32(bytes, &mut offset)?, read_f32(bytes, &mut offset)?);
+        let (bias_z, bias_n) = (read_f32(bytes, &mut offset)?, read_f32(bytes, &mut offset)?);
+        if size < 1024 || !size.is_power_of_two() {
+            return None;
+        }
+        let mut z = Vec::with_capacity(size);
+        for _ in 0..size {
+            z.push(read_f32(bytes, &mut offset)?);
+        }
+        let mut n = Vec::with_capacity(size);
+        for _ in 0..size {
+            n.push(read_f32(bytes, &mut offset)?);
+        }
+        Some(Self {
+            hash_mask: (size - 1) as u64,
+            alpha,
+            beta,
+            l1,
+            l2,
+            z,
+            n,
+            bias_z,
+            bias_n,
+            trained,
+        })
     }
+}
+
+fn read_u32(bytes: &[u8], offset: &mut usize) -> Option<u32> {
+    let value = u32::from_le_bytes(bytes.get(*offset..*offset + 4)?.try_into().ok()?);
+    *offset += 4;
+    Some(value)
+}
+
+fn read_u64(bytes: &[u8], offset: &mut usize) -> Option<u64> {
+    let value = u64::from_le_bytes(bytes.get(*offset..*offset + 8)?.try_into().ok()?);
+    *offset += 8;
+    Some(value)
+}
+
+fn read_f32(bytes: &[u8], offset: &mut usize) -> Option<f32> {
+    let value = f32::from_le_bytes(bytes.get(*offset..*offset + 4)?.try_into().ok()?);
+    *offset += 4;
+    Some(value)
 }
 
 fn sigmoid(z: f32) -> f32 {
@@ -225,7 +289,7 @@ impl ClassifierSet {
 /// Lowercase the text, split on anything that is not alphanumeric, drop
 /// stopwords and very short/long tokens, and cap the total.
 pub fn tokenize<'a>(parts: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<String> {
-    let stop: HashSet<&str> = STOPWORDS.iter().copied().collect();
+    let stop = stopwords();
     let mut out = Vec::new();
     for (prefix, text) in parts {
         for raw in text.split(|c: char| !c.is_alphanumeric()) {
@@ -243,6 +307,12 @@ pub fn tokenize<'a>(parts: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<
         }
     }
     out
+}
+
+/// The stopword set, built once instead of on every message.
+fn stopwords() -> &'static HashSet<&'static str> {
+    static STOP: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    STOP.get_or_init(|| STOPWORDS.iter().copied().collect())
 }
 
 #[cfg(test)]

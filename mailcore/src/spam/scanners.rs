@@ -80,7 +80,7 @@ pub async fn extract_text(client: &reqwest::Client, url: &str, raw: &[u8]) -> Op
 async fn clamav(addr: &str, raw: &[u8]) -> anyhow::Result<Option<String>> {
     let mut stream = TcpStream::connect(addr).await?;
     stream.write_all(b"zINSTREAM\0").await?;
-    for chunk in raw.chunks(4096) {
+    for chunk in raw.chunks(64 * 1024) {
         stream
             .write_all(&(chunk.len() as u32).to_be_bytes())
             .await?;

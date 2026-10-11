@@ -491,7 +491,12 @@ async fn fetch_rules(client: Option<&reqwest::Client>, url: Option<&str>) -> Vec
         return Vec::new();
     };
     match serde_json::from_str::<Vec<rules::Rule>>(&body) {
-        Ok(rules) => rules,
+        Ok(mut rules) => {
+            for rule in &mut rules {
+                rule.compile();
+            }
+            rules
+        }
         Err(err) => {
             tracing::warn!(url = %url, error = %err, "ignored a malformed spam ruleset");
             Vec::new()

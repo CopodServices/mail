@@ -449,14 +449,17 @@ impl Session {
                 .await;
         }
 
-        let verdict = match self.mode {
-            Mode::Inbound => self.scan_spam(&raw, &outcome).await,
-            Mode::Submission => None,
+        // Parsed once: the spam scan and the stored metadata both read it, and
+        // every local copy below reuses the same metadata.
+        let parsed = mailcore::meta::parse(&raw);
+        let metadata = parsed
+            .as_ref()
+            .map(mailcore::meta::from_message)
+            .unwrap_or_default();
+        let verdict = match (self.mode, parsed.as_ref()) {
+            (Mode::Inbound, Some(message)) => self.scan_spam(&raw, message, &outcome).await,
+            _ => None,
         };
-
-        // Parsed once and shared by every local copy, so a message addressed to
-        // several mailboxes is not re-parsed for each one.
-        let metadata = mailcore::meta::extract(&raw);
 
         let envelope_from = self.mail_from.clone().unwrap_or_default();
         let recipients = std::mem::take(&mut self.recipients);
@@ -623,6 +626,7 @@ impl Session {
     async fn scan_spam(
         &self,
         raw: &[u8],
+        message: &mail_parser::Message<'_>,
         outcome: &AuthOutcome,
     ) -> Option<mailcore::spam::Verdict> {
         let engine = self.state.spam.as_ref()?;
@@ -633,20 +637,17 @@ impl Session {
             .collect();
         let helo = self.helo.clone().unwrap_or_else(|| "unknown".to_string());
         let mail_from = self.mail_from.clone().unwrap_or_default();
-        Some(
-            engine
-                .scan_raw(
-                    raw,
-                    self.peer.ip(),
-                    &helo,
-                    &mail_from,
-                    &self.state.config.hostname,
-                    &recipients,
-                    outcome,
-                    None,
-                )
-                .await,
-        )
+        let input = mailcore::spam::SpamInput {
+            raw,
+            message,
+            peer_ip: self.peer.ip(),
+            helo: &helo,
+            mail_from: &mail_from,
+            hostname: &self.state.config.hostname,
+            recipients: &recipients,
+            auth: outcome,
+        };
+        Some(engine.scan(&input, None).await)
     }
 
     /// File this recipient's copy as junk when the spam verdict applies to it.

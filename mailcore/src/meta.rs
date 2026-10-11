@@ -9,11 +9,18 @@ pub struct Metadata {
     pub references: Option<String>,
 }
 
+/// Parses a raw message once, so several consumers can share the parsed form.
+pub fn parse(raw: &[u8]) -> Option<mail_parser::Message<'_>> {
+    mail_parser::MessageParser::default().parse(raw)
+}
+
 /// Pulls the display metadata out of the raw message with mail-parser.
 pub fn extract(raw: &[u8]) -> Metadata {
-    let Some(parsed) = mail_parser::MessageParser::default().parse(raw) else {
-        return Metadata::default();
-    };
+    parse(raw).as_ref().map(from_message).unwrap_or_default()
+}
+
+/// Pulls the display metadata out of an already parsed message.
+pub fn from_message(parsed: &mail_parser::Message<'_>) -> Metadata {
     Metadata {
         message_id: parsed.message_id().map(str::to_string),
         subject: parsed.subject().map(str::to_string),

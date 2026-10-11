@@ -57,18 +57,6 @@ pub async fn store_local_with_spam(
     quarantine: bool,
     metadata: &meta::Metadata,
 ) -> Result<Uuid> {
-    // Refuse a message that would push the mailbox past its storage quota; a
-    // zero quota means unlimited. Checked before the object-store write so an
-    // over-quota message leaves nothing behind.
-    if mailbox.quota_bytes > 0 {
-        let used = repo::mailbox_usage_bytes(&state.db, mailbox.id)
-            .await
-            .context("failed to read the mailbox usage")?;
-        if exceeds_quota(used, raw.len() as i64, mailbox.quota_bytes) {
-            bail!("mailbox {} is over its storage quota", mailbox.address);
-        }
-    }
-
     let id = Uuid::now_v7();
     let now = Utc::now();
     let domain = mailbox
@@ -86,6 +74,13 @@ pub async fn store_local_with_spam(
     };
     // Kept for the row's size before the buffer moves into the object store.
     let stored_len = stored.len() as i64;
+    // Refuse a message that would push the mailbox past its storage quota; a
+    // zero quota means unlimited. The running total on the mailbox row answers
+    // this without summing the mailbox, and the check runs before the
+    // object-store write so an over-quota message leaves nothing behind.
+    if exceeds_quota(mailbox.used_bytes, stored_len, mailbox.quota_bytes) {
+        bail!("mailbox {} is over its storage quota", mailbox.address);
+    }
     state
         .store
         .put(&key, stored)
@@ -136,6 +131,10 @@ pub async fn store_local_with_spam(
         },
     )
     .await?;
+
+    repo::add_mailbox_usage(&state.db, mailbox.id, stored_len)
+        .await
+        .context("failed to update the mailbox usage")?;
 
     // Tell connected clients that mail arrived for this mailbox.
     if inbound {

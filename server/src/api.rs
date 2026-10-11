@@ -14,10 +14,7 @@ use mailcore::policy::AuthOutcome;
 use mailcore::query;
 use mailcore::{address, repo};
 use mailcore::{body, compose, store};
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, NotSet, QueryFilter,
-    QueryOrder, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, NotSet, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
@@ -785,15 +782,10 @@ impl MailboxResponse {
         }
     }
 
-    /// Builds the response with the mailbox's live storage usage.
-    pub async fn load(
-        db: &DatabaseConnection,
-        model: entity::mailbox::Model,
-    ) -> Result<Self, ApiError> {
-        let used_bytes = repo::mailbox_usage_bytes(db, model.id)
-            .await
-            .map_err(db_error)?;
-        Ok(Self::new(model, used_bytes))
+    /// Builds the response from the mailbox's running byte total.
+    pub fn load(model: entity::mailbox::Model) -> Self {
+        let used_bytes = model.used_bytes;
+        Self::new(model, used_bytes)
     }
 }
 
@@ -3987,14 +3979,11 @@ pub async fn list_mailboxes(
             .collect(),
         None => repo::list_mailboxes(&state.db).await.map_err(db_error)?,
     };
-    // One grouped query covers the whole list, whatever the caller's scope.
-    let usage = repo::mailbox_usage_totals(&state.db)
-        .await
-        .map_err(db_error)?;
+    // The running total kept on each mailbox row answers this without a query.
     let payload = mailboxes
         .into_iter()
         .map(|mailbox| {
-            let used_bytes = usage.get(&mailbox.id).copied().unwrap_or(0);
+            let used_bytes = mailbox.used_bytes;
             MailboxResponse::new(mailbox, used_bytes)
         })
         .collect();
@@ -4029,7 +4018,7 @@ pub async fn create_mailbox(
         .await
         .map_err(|err| conflict(err.to_string()))?;
 
-    let response = MailboxResponse::load(&state.db, mailbox).await?;
+    let response = MailboxResponse::load(mailbox);
     Ok((StatusCode::CREATED, Json(DataResponse { data: response })).into_response())
 }
 
@@ -4153,7 +4142,7 @@ pub async fn update_mailbox(
     .await
     .map_err(db_error)?
     .ok_or_else(|| not_found("Unknown mailbox"))?;
-    let response = MailboxResponse::load(&state.db, updated).await?;
+    let response = MailboxResponse::load(updated);
     Ok(Json(DataResponse { data: response }).into_response())
 }
 

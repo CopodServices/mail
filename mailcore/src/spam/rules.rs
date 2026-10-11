@@ -23,6 +23,11 @@ impl Rule {
     pub fn matches(&self, ctx: &RuleContext<'_>) -> bool {
         self.when.eval(ctx)
     }
+
+    /// Compiles the rule's regex leaves once, when the rules are loaded.
+    pub fn compile(&mut self) {
+        self.when.compile();
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -35,6 +40,17 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// Compiles any regex leaves once. Compiling inside evaluation would redo
+    /// the work for every element of every rule of every message.
+    pub fn compile(&mut self) {
+        match self {
+            Expr::All { all } => all.iter_mut().for_each(Expr::compile),
+            Expr::Any { any } => any.iter_mut().for_each(Expr::compile),
+            Expr::Not { not } => not.compile(),
+            Expr::Leaf(leaf) => leaf.compile(),
+        }
+    }
+
     pub fn eval(&self, ctx: &RuleContext<'_>) -> bool {
         match self {
             Expr::All { all } => all.iter().all(|expr| expr.eval(ctx)),
@@ -55,9 +71,22 @@ pub struct Leaf {
     pub values: Option<Vec<String>>,
     #[serde(default)]
     pub case_sensitive: bool,
+    /// Compiled once at load; never read from or written to the config file.
+    #[serde(skip, default)]
+    regex: Option<std::sync::Arc<regex::Regex>>,
 }
 
 impl Leaf {
+    fn compile(&mut self) {
+        if self.op.eq_ignore_ascii_case("regex") {
+            self.regex = self
+                .value
+                .as_deref()
+                .and_then(|pattern| regex::Regex::new(pattern).ok())
+                .map(std::sync::Arc::new);
+        }
+    }
+
     fn eval(&self, ctx: &RuleContext<'_>) -> bool {
         let candidates = ctx.field_values(&self.field);
         candidates
@@ -86,9 +115,7 @@ impl Leaf {
             "glob" => {
                 super::config::glob_match(self.value.as_deref().unwrap_or_default(), candidate)
             }
-            "regex" => regex::Regex::new(self.value.as_deref().unwrap_or(""))
-                .map(|re| re.is_match(candidate))
-                .unwrap_or(false),
+            "regex" => self.regex.as_ref().is_some_and(|re| re.is_match(candidate)),
             "in-list" => self
                 .values
                 .as_ref()

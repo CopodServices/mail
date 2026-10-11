@@ -16,6 +16,7 @@ mod m20261011_000013_mailbox_auto_forward;
 mod m20261011_000014_antispam;
 mod m20261011_000014_message_search_trgm;
 mod m20261011_000015_imap_pop3;
+mod m20261011_000015_mailbox_usage;
 
 pub struct Migrator;
 
@@ -37,6 +38,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261011_000012_outbound_copy_and_keyset::Migration),
             Box::new(m20261011_000013_mailbox_auto_forward::Migration),
             Box::new(m20261011_000014_antispam::Migration),
+            Box::new(m20261011_000015_mailbox_usage::Migration),
             Box::new(m20261011_000014_message_search_trgm::Migration),
             Box::new(m20261011_000015_imap_pop3::Migration),
         ]

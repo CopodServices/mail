@@ -259,7 +259,7 @@ impl SpamConfig {
         );
 
         let scanners = merge_scanners(file.scanners);
-        let rules = file
+        let mut rules: Vec<Rule> = file
             .rules
             .into_iter()
             .filter_map(|value| match serde_json::from_value::<Rule>(value) {
@@ -270,6 +270,9 @@ impl SpamConfig {
                 }
             })
             .collect();
+        for rule in &mut rules {
+            rule.compile();
+        }
 
         let dnsbl = merge_zones(file.dnsbl);
 

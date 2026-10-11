@@ -20,6 +20,8 @@ pub struct Model {
     /// Address every arriving message is copied to, when set.
     pub forward_to: Option<String>,
     pub quota_bytes: i64,
+    /// Running total of the bytes stored for this mailbox.
+    pub used_bytes: i64,
     pub active: bool,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
