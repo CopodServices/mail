@@ -7,9 +7,9 @@
 
 import { describe, expect, test } from "bun:test";
 import {
-	SPAM_SCORE_CEILING,
 	maxSignalMagnitude,
 	parseSpamSignals,
+	SPAM_SCORE_CEILING,
 	scorePercent,
 } from "@/components/messages/message-detail/spam-score-utils";
 
@@ -56,9 +56,7 @@ describe("parseSpamSignals", () => {
 describe("maxSignalMagnitude", () => {
 	test("scales against the heaviest tag, defaulting to one", () => {
 		expect(maxSignalMagnitude([])).toBe(1);
-		expect(
-			maxSignalMagnitude(parseSpamSignals("A (1.50), B (4.00)")),
-		).toBe(4);
+		expect(maxSignalMagnitude(parseSpamSignals("A (1.50), B (4.00)"))).toBe(4);
 	});
 });
 
