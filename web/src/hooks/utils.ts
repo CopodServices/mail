@@ -60,6 +60,11 @@ export function getMessageQueryParams(
 	if (filters?.limit) params.set("limit", String(filters.limit));
 	if (filters?.cursor) params.set("cursor", filters.cursor);
 
+	// A plain folder view takes its totals from /api/messages/counts, so the
+	// list need not count its rows. A search is filtered on the server, where
+	// only the list knows the match count, so it keeps the count.
+	if (!params.has("q")) params.set("with_total", "false");
+
 	return params;
 }
 

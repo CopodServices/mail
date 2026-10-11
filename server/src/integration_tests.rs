@@ -1011,6 +1011,155 @@ async fn sessions_scope_a_mailbox_and_the_operator_key_manages_tenants() {
         .await;
 }
 
+/// The neighbour walk follows the reader's order inside one folder: the unread
+/// messages newest first, then the read ones newest first, and a message in
+/// another folder is never walked. Postgres alone is enough:
+///
+///     MAIL_TEST_INTEGRATION=1 cargo test --all neighbors_walk
+#[tokio::test]
+async fn neighbors_walk_the_reading_order_within_a_folder() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    let config = test_config();
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+
+    let domain = format!("neighbors-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let mailbox = repo::create_mailbox(&db, &format!("inbox@{domain}"), "secret")
+        .await
+        .unwrap();
+
+    // Two unread arrivals (a newer than b) and two read ones (d newer than c),
+    // plus a sent copy and a quarantined message that live in other folders.
+    let a = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Stored,
+        5,
+    )
+    .await;
+    let b = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Stored,
+        4,
+    )
+    .await;
+    let c = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Stored,
+        3,
+    )
+    .await;
+    let d = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Stored,
+        2,
+    )
+    .await;
+    for id in [c, d] {
+        set_flag(&db, id, true, false, "inbox", None).await;
+    }
+    let sent = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Outbound,
+        message::Status::Stored,
+        0,
+    )
+    .await;
+    let spam = insert_message(
+        &db,
+        &mailbox,
+        message::Direction::Inbound,
+        message::Status::Quarantined,
+        1,
+    )
+    .await;
+    let fixtures = [a, b, c, d, sent, spam];
+
+    let filters = query::MessageFilters {
+        mailbox_id: Some(mailbox.id),
+        folder: Some("inbox".to_string()),
+        ..query::MessageFilters::default()
+    };
+    async fn walk(
+        db: &sea_orm::DatabaseConnection,
+        filters: &query::MessageFilters,
+        id: Uuid,
+        unread: bool,
+    ) -> query::Neighbors {
+        let row = repo::get_message(db, id).await.unwrap().unwrap();
+        query::neighbors(
+            db,
+            filters,
+            query::MessageCursor {
+                received_at: row.received_at,
+                id: row.id,
+            },
+            unread,
+        )
+        .await
+        .unwrap()
+    }
+
+    let a_n = walk(&db, &filters, a, true).await;
+    assert_eq!(a_n.total, 4, "only the four inbox messages are walked");
+    assert_eq!(a_n.unread_total, 2);
+    assert_eq!(a_n.position, 1);
+    assert_eq!(a_n.unread_position, 1);
+    assert_eq!(a_n.previous_id, None, "the newest unread leads the order");
+    assert_eq!(a_n.next_id, Some(b));
+
+    let b_n = walk(&db, &filters, b, true).await;
+    assert_eq!(b_n.position, 2);
+    assert_eq!(b_n.previous_id, Some(a));
+    assert_eq!(
+        b_n.next_id,
+        Some(d),
+        "the last unread hands over to the newest read"
+    );
+
+    let d_n = walk(&db, &filters, d, false).await;
+    assert_eq!(d_n.position, 3);
+    assert_eq!(
+        d_n.unread_position, 0,
+        "a read message has no unread position"
+    );
+    assert_eq!(
+        d_n.previous_id,
+        Some(b),
+        "the newest read follows the oldest unread"
+    );
+    assert_eq!(d_n.next_id, Some(c));
+
+    let c_n = walk(&db, &filters, c, false).await;
+    assert_eq!(c_n.position, 4);
+    assert_eq!(c_n.previous_id, Some(d));
+    assert_eq!(c_n.next_id, None, "the oldest read ends the order");
+
+    for id in fixtures {
+        repo::delete_message(&db, id).await.unwrap();
+    }
+    let _ = repo::delete_mailbox(&db, &mailbox.address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
 /// The folder classification, the counts and the keyset pages all read the same
 /// reader state, and a copy in the sender's own Sent folder is never unread.
 /// Postgres alone is enough:

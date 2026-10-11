@@ -73,6 +73,7 @@ fn messages_router() -> OpenApiRouter<AppState> {
         .routes(routes!(list_messages))
         .routes(routes!(message_counts))
         .routes(routes!(message_navigation))
+        .routes(routes!(get_message_neighbors))
         .routes(routes!(bulk_messages))
         .routes(routes!(empty_folder))
         .routes(routes!(get_message))
@@ -545,15 +546,16 @@ impl<T: Serialize> ListResponse<T> {
         Self {
             data,
             meta: Meta {
-                total,
+                total: Some(total),
                 limit: None,
                 next_cursor: None,
             },
         }
     }
 
-    /// A paginated collection: total is the filtered count, not the page size.
-    fn page(data: Vec<T>, total: i64, limit: u64, next_cursor: Option<String>) -> Self {
+    /// A paginated collection: total is the filtered count, not the page size,
+    /// and is absent when the request did not ask for a count.
+    fn page(data: Vec<T>, total: Option<i64>, limit: u64, next_cursor: Option<String>) -> Self {
         Self {
             data,
             meta: Meta {
@@ -573,7 +575,10 @@ impl<T: Serialize> IntoResponse for ListResponse<T> {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct Meta {
-    pub total: i64,
+    /// The number of rows the filters match; absent when the request asked for
+    /// the page alone (`with_total=false`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
     /// The opaque cursor for the page after this one, absent on the last page.
@@ -925,6 +930,10 @@ pub struct MessageQuery {
     pub limit: Option<u64>,
     /// The opaque cursor a previous page returned; the list resumes after it.
     pub cursor: Option<String>,
+    /// Whether to count every matching message for `meta.total` (default true).
+    /// The web client passes false and takes its totals from
+    /// /api/messages/counts, so the list does not run a second aggregate.
+    pub with_total: Option<bool>,
 }
 
 impl MessageQuery {
@@ -1171,18 +1180,40 @@ pub struct NavigationEntry {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct ThreadMessageResponse {
-    #[serde(flatten)]
-    pub message: MessageResponse,
-    pub text: Option<String>,
-    pub html: Option<String>,
-    pub attachments: Vec<AttachmentResponse>,
+pub struct NeighborsResponse {
+    /// The message just newer than the open one in the reading order.
+    pub previous_id: Option<Uuid>,
+    /// The message just older than the open one in the reading order.
+    pub next_id: Option<Uuid>,
+    /// One-based position of the open message in the reading order.
+    pub position: i64,
+    /// Every message the folder's filters match.
+    pub total: i64,
+    /// One-based position among the unread messages; zero when read.
+    pub unread_position: i64,
+    /// Every unread message the folder's filters match.
+    pub unread_total: i64,
+}
+
+/// The folder an open message is read in, plus the client's view of its read
+/// state, so a neighbour report stays stable while opening it marks it read.
+#[derive(Debug, Default, Deserialize)]
+pub struct NeighborQuery {
+    pub mailbox: Option<String>,
+    pub mailbox_id: Option<Uuid>,
+    /// System folder or custom folder id.
+    pub folder: Option<String>,
+    pub unread: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ThreadResponse {
     pub thread_id: String,
-    pub messages: Vec<ThreadMessageResponse>,
+    /// Every message in the conversation, without bodies or attachments: the
+    /// reader already holds the open message's body, and a collapsed member's
+    /// body is loaded only when it is expanded, so the thread never reads and
+    /// parses every stored copy on the open path.
+    pub messages: Vec<MessageResponse>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1295,7 +1326,8 @@ pub async fn attachment_policy(
         ("read" = Option<String>, Query, description = "read or unread"),
         ("starred" = Option<String>, Query, description = "true for starred only"),
         ("limit" = Option<u64>, Query, description = "Page size (default 50, max 200)"),
-        ("cursor" = Option<String>, Query, description = "Cursor the previous page returned")
+        ("cursor" = Option<String>, Query, description = "Cursor the previous page returned"),
+        ("with_total" = Option<bool>, Query, description = "Count every matching message for meta.total (default true); false skips the count")
     ),
     responses((status = 200, description = "Stored messages", body = ListResponse<MessageResponse>))
 )]
@@ -1307,9 +1339,20 @@ pub async fn list_messages(
     let filters = query.filters(&state, principal.mailbox_scope()).await?;
     let cursor = query.cursor()?;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
-    let page = query::message_page(&state.db, &filters, cursor, limit)
+    let page = query::message_page_ids(&state.db, &filters, cursor, limit)
         .await
         .map_err(db_error)?;
+    // The count is a second aggregate over the whole mailbox. A caller that
+    // already holds the totals (the web client reads /api/messages/counts)
+    // passes with_total=false and gets the page alone.
+    let total = match query.with_total {
+        Some(false) => None,
+        _ => Some(
+            query::count_matching(&state.db, &filters)
+                .await
+                .map_err(db_error)?,
+        ),
+    };
 
     // The ids come back in page order; fetch the rows and their state to match.
     let rows = message::Entity::find()
@@ -1331,7 +1374,7 @@ pub async fn list_messages(
     }
 
     let next_cursor = page.next.map(|cursor| cursor.encode());
-    Ok(ListResponse::page(messages, page.total, limit, next_cursor).into_response())
+    Ok(ListResponse::page(messages, total, limit, next_cursor).into_response())
 }
 
 #[utoipa::path(
@@ -2022,6 +2065,82 @@ pub async fn message_navigation(
 
 #[utoipa::path(
     get,
+    path = "/api/messages/{id}/neighbors",
+    tag = "messages",
+    params(
+        ("id" = Uuid, Path, description = "Message id"),
+        ("mailbox" = Option<String>, Query, description = "Mailbox address"),
+        ("mailbox_id" = Option<Uuid>, Query, description = "Mailbox id"),
+        ("folder" = Option<String>, Query, description = "Folder"),
+        ("unread" = Option<bool>, Query, description = "The client's view of the open message's read state")
+    ),
+    responses(
+        (status = 200, description = "Neighbours and position in the open folder", body = DataResponse<NeighborsResponse>),
+        (status = 404, description = "Unknown message")
+    )
+)]
+pub async fn get_message_neighbors(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<Uuid>,
+    Query(params): Query<NeighborQuery>,
+) -> Result<Response, ApiError> {
+    let target = repo::get_message(&state.db, id)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| not_found("Unknown message"))?;
+    ensure_scope(&principal, target.mailbox_id, "Unknown message")?;
+
+    // The folder the reader is walking; the neighbour walk stays inside it.
+    let query = MessageQuery {
+        mailbox: params.mailbox.clone(),
+        mailbox_id: params.mailbox_id,
+        folder: params.folder.clone(),
+        ..MessageQuery::default()
+    };
+    let filters = query.filters(&state, principal.mailbox_scope()).await?;
+    // The client's read state for the open message, so the report does not move
+    // when opening it marks it read. Without it, fall back to the stored flag.
+    let target_unread = match params.unread {
+        Some(unread) => unread,
+        None => match target.direction {
+            message::Direction::Inbound => {
+                let flag = message_flag::Entity::find_by_id(target.id)
+                    .one(&state.db)
+                    .await
+                    .map_err(db_error)?;
+                !flag.map(|flag| flag.read).unwrap_or(false)
+            }
+            message::Direction::Outbound => false,
+        },
+    };
+    let neighbors = query::neighbors(
+        &state.db,
+        &filters,
+        query::MessageCursor {
+            received_at: target.received_at,
+            id: target.id,
+        },
+        target_unread,
+    )
+    .await
+    .map_err(db_error)?;
+
+    Ok(Json(DataResponse {
+        data: NeighborsResponse {
+            previous_id: neighbors.previous_id,
+            next_id: neighbors.next_id,
+            position: neighbors.position,
+            total: neighbors.total,
+            unread_position: neighbors.unread_position,
+            unread_total: neighbors.unread_total,
+        },
+    })
+    .into_response())
+}
+
+#[utoipa::path(
+    get,
     path = "/api/messages/{id}/thread",
     tag = "messages",
     params(("id" = Uuid, Path, description = "Message id")),
@@ -2062,27 +2181,11 @@ pub async fn get_message_thread(
     for row in members {
         let id = row.id;
         let flag = flags.iter().find(|flag| flag.message_id == row.id);
-        // A member whose stored copy is gone still shows, with an empty body,
-        // rather than failing the whole conversation.
-        let parsed = match read_stored(&state, &row.storage_key).await {
-            Ok(raw) => body::extract(&raw),
-            Err(_) => {
-                tracing::warn!(key = %row.storage_key, "thread member has no stored copy");
-                body::Body::default()
-            }
-        };
-        let attachments = parsed
-            .attachments
-            .iter()
-            .enumerate()
-            .map(|(index, attachment)| AttachmentResponse::from_part(index, attachment))
-            .collect();
-        messages.push(ThreadMessageResponse {
-            message: MessageResponse::with_flags(row, flag, extras.remove(&id).unwrap_or_default()),
-            text: parsed.text,
-            html: parsed.html,
-            attachments,
-        });
+        messages.push(MessageResponse::with_flags(
+            row,
+            flag,
+            extras.remove(&id).unwrap_or_default(),
+        ));
     }
 
     Ok(Json(DataResponse {
@@ -4146,6 +4249,30 @@ mod tests {
         assert!(!inline_previewable("image/svg+xml"));
         assert!(!inline_previewable("application/xml"));
         assert!(!inline_previewable("application/octet-stream"));
+    }
+
+    #[test]
+    fn a_list_omits_the_total_when_the_page_was_not_counted() {
+        // with_total=false: the page alone, no count and no next page.
+        let page = ListResponse::page(vec![1u8], None, 25, None);
+        let json = serde_json::to_value(&page).unwrap();
+        assert_eq!(json["meta"]["limit"], 25);
+        assert!(
+            json["meta"].get("total").is_none(),
+            "the total is absent when it was not counted: {json}"
+        );
+        assert!(
+            json["meta"].get("next_cursor").is_none(),
+            "the last page carries no cursor: {json}"
+        );
+
+        let counted = ListResponse::page(vec![1u8], Some(8), 25, None);
+        let json = serde_json::to_value(&counted).unwrap();
+        assert_eq!(json["meta"]["total"], 8);
+
+        let full = ListResponse::new(vec![1u8, 2]);
+        let json = serde_json::to_value(&full).unwrap();
+        assert_eq!(json["meta"]["total"], 2, "an unpaginated list still counts");
     }
 
     #[test]

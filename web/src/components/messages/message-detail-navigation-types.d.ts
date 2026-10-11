@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import type { MessageNavigationEntry } from "@/lib/api/types";
 import type { MessageFolderConfig } from "./types";
 
 export type MessageDetailNavigationProviderProps = {
@@ -12,25 +11,9 @@ export type MessageDetailNavigationProps = {
 	unread: boolean;
 };
 
-export type MessageDetailNavigationSnapshot = {
-	key: string;
-	entries: MessageNavigationEntry[];
-};
-
-export type OpenedUnreadMessages = {
-	key: string;
-	ids: Set<string>;
-};
-
 export type MessageDetailNavigationContextValue = {
-	entries: MessageNavigationEntry[];
+	/** The folder the reader is walking, so the neighbour call asks for its order. */
+	folder: string;
+	folderId: string | null;
 	hrefPrefix: string;
-	recordUnread: (messageId: string) => void;
-};
-
-export type MessageDetailNavigationState = {
-	previousId: string | null;
-	nextId: string | null;
-	unreadOrder: number;
-	totalUnread: number;
 };

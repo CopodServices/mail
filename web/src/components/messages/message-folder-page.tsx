@@ -36,7 +36,6 @@ import {
 	supportsPermanentDelete,
 } from "@/lib/messages/permanent-delete-utils";
 import { BulkMessageToolbar } from "./bulk-message-toolbar";
-import { rememberOpenedUnreadMessage } from "./message-detail-navigation-utils";
 import { MessageListRowActions } from "./message-list-row-actions";
 import {
 	dispatchMessageCountsDelta,
@@ -151,7 +150,6 @@ function MessageListRow({
 			!event.shiftKey &&
 			!event.altKey
 		) {
-			rememberOpenedUnreadMessage(message.id);
 			const previousThreadUnread = threadUnread;
 			setRead(true);
 			if (previousThreadUnread !== undefined)
@@ -428,10 +426,19 @@ export function MessageFolderPage({
 		: counts.folders[config.folder];
 	const titleTotal = folderCount?.total ?? total;
 	const titleUnread = folderCount?.unread ?? 0;
+	// A plain folder view no longer counts its rows in the list response (the
+	// totals ride in on the counts above), so the range reads from the counts:
+	// the unread count on the unread view, the folder total otherwise. A search
+	// is filtered on the server, so its own total is the match count.
+	const listTotal = hasActiveFilters
+		? total
+		: unreadOnly
+			? (folderCount?.unread ?? total)
+			: titleTotal;
 	const mailboxAddress = getMailboxAddress(selectedMailbox);
 	const currentAccountName =
 		selectedMailbox?.displayName ?? selectedMailbox?.localPart;
-	const pageRange = getPageRange(pageIndex, limit, messages.length, total);
+	const pageRange = getPageRange(pageIndex, limit, messages.length, listTotal);
 	const selectedMessages =
 		selection?.selectedMessages ?? internalSelectedMessages;
 	const setSelectedMessages =
@@ -720,7 +727,7 @@ export function MessageFolderPage({
 									variant="ghost"
 									size="sm"
 									aria-label={getEmptyFolderLabel(permanentDeleteFolder, t)}
-									disabled={emptyingFolder || isLoading || total === 0}
+									disabled={emptyingFolder || isLoading || listTotal === 0}
 									onClick={() => void emptyFolder()}
 									className="gap-1.5 text-xs font-medium text-red-600 hover:text-red-700"
 								>

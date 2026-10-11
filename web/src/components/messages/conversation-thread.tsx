@@ -6,11 +6,14 @@ import { useEffect, useState } from "react";
 import { ContactAvatar } from "@/components/contacts/contact-avatar";
 import { useLanguage } from "@/components/language-provider";
 import { runSingleMessageAction } from "@/components/message-actions/utils";
+import type { MessageDetailResponse } from "@/components/messages/message-detail/types";
 import {
+	fetchMessageDetail,
 	getMessageBodyDisplay,
 	resolveInlineAttachmentUrls,
 } from "@/components/messages/message-detail/utils";
 import { QuotedEmailToggle } from "@/components/messages/quoted-email-toggle";
+import { Skeleton } from "@/components/ui/skeleton";
 import { formatUserDate } from "@/lib/time/utils";
 import { cn } from "@/lib/utils";
 import type {
@@ -149,6 +152,10 @@ function ConversationMessageCard({
 	const { t } = useLanguage();
 	const [locallyExpanded, setLocallyExpanded] = useState(defaultExpanded);
 	const [locallyRead, setLocallyRead] = useState(message.read);
+	// The thread endpoint lists headers only; a member's body and attachments
+	// arrive from that message's own detail call when the card is first opened.
+	const [detail, setDetail] = useState<MessageDetailResponse | null>(null);
+	const [loadingBody, setLoadingBody] = useState(false);
 	const expanded = locallyExpanded;
 	const sender = getConversationSender(message, currentAccountName);
 	const senderEmail = getConversationSenderEmail(message);
@@ -158,7 +165,8 @@ function ConversationMessageCard({
 	);
 	// const href = `${getMessageBackHref(message.direction, message.status)}/${message.id}`;
 	const outbound = message.direction === "outbound";
-	const attachments = message.attachments.filter(
+	const memberAttachments = detail?.attachments ?? message.attachments;
+	const attachments = memberAttachments.filter(
 		(attachment) => attachment.disposition === "attachment",
 	);
 	const { visible: messageListVisible } = useMessageListVisibility();
@@ -167,28 +175,45 @@ function ConversationMessageCard({
 
 	useEffect(() => setLocallyRead(message.read), [message.read]);
 
+	useEffect(() => {
+		if (!expanded || detail) return;
+		let cancelled = false;
+		setLoadingBody(true);
+		void fetchMessageDetail(message.id)
+			.then((next) => {
+				if (!cancelled) setDetail(next);
+			})
+			.catch(() => {})
+			.finally(() => {
+				if (!cancelled) setLoadingBody(false);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [expanded, detail, message.id]);
+
 	let body: {
 		html: string | null;
 		text: string;
 		quotedHtml: string | null;
 	} | null = null;
-	if (expanded) {
+	if (expanded && detail) {
 		const display = getMessageBodyDisplay(
-			message.textBody,
-			message.htmlBody,
+			detail.body?.textBody ?? message.textBody,
+			detail.body?.htmlBody ?? message.htmlBody,
 			message.snippet,
 		);
 		body = {
 			html: resolveInlineAttachmentUrls(
 				display.htmlBody,
 				message.id,
-				message.attachments,
+				memberAttachments,
 			),
 			text: display.latestContent,
 			quotedHtml: resolveInlineAttachmentUrls(
 				display.quotedHtml,
 				message.id,
-				message.attachments,
+				memberAttachments,
 			),
 		};
 	}
@@ -289,16 +314,27 @@ function ConversationMessageCard({
 						starOnly={!expanded}
 					/>
 				</div>
-				{expanded && body && (
+				{expanded && (body || loadingBody) && (
 					<div className="pb-4 pl-16 pt-2">
-						{body.html ? (
-							<EmailHtmlRenderer html={body.html} />
+						{body ? (
+							<>
+								{body.html ? (
+									<EmailHtmlRenderer html={body.html} />
+								) : (
+									<pre className="whitespace-pre-wrap font-sans text-sm text-neutral-900">
+										{body.text}
+									</pre>
+								)}
+								{body.quotedHtml && (
+									<QuotedEmailToggle html={body.quotedHtml} />
+								)}
+							</>
 						) : (
-							<pre className="whitespace-pre-wrap font-sans text-sm text-neutral-900">
-								{body.text}
-							</pre>
+							<div className="space-y-2">
+								<Skeleton className="h-4 w-3/4" />
+								<Skeleton className="h-4 w-1/2" />
+							</div>
 						)}
-						{body.quotedHtml && <QuotedEmailToggle html={body.quotedHtml} />}
 						{attachments.length > 0 && (
 							<ul className="mt-4 flex flex-wrap gap-2">
 								{attachments.map((attachment) => (

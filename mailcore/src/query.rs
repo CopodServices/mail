@@ -166,13 +166,22 @@ pub struct MessagePage {
     pub next: Option<MessageCursor>,
 }
 
-/// Reads one keyset page, plus the total the filters match.
-pub async fn message_page(
+/// One keyset page of ids, newest first, without the filtered total. The count
+/// is a second aggregate over the whole mailbox, so a caller that already holds
+/// the totals reads the page with this and skips it.
+#[derive(Debug)]
+pub struct MessagePageIds {
+    pub ids: Vec<Uuid>,
+    pub next: Option<MessageCursor>,
+}
+
+/// Reads one keyset page of ids, without counting the rows the filters match.
+pub async fn message_page_ids(
     db: &DatabaseConnection,
     filters: &MessageFilters,
     cursor: Option<MessageCursor>,
     limit: u64,
-) -> Result<MessagePage> {
+) -> Result<MessagePageIds> {
     let mut clause = filters.clause();
     if let Some(cursor) = cursor {
         let received_at = clause.bind(cursor.received_at.into());
@@ -207,11 +216,25 @@ pub async fn message_page(
         MessageCursor { received_at, id }
     });
 
+    Ok(MessagePageIds {
+        ids: page.into_iter().map(|(id, _)| id).collect(),
+        next,
+    })
+}
+
+/// Reads one keyset page, plus the total the filters match.
+pub async fn message_page(
+    db: &DatabaseConnection,
+    filters: &MessageFilters,
+    cursor: Option<MessageCursor>,
+    limit: u64,
+) -> Result<MessagePage> {
+    let page = message_page_ids(db, filters, cursor, limit).await?;
     let total = count_matching(db, filters).await?;
     Ok(MessagePage {
-        ids: page.into_iter().map(|(id, _)| id).collect(),
+        ids: page.ids,
         total,
-        next,
+        next: page.next,
     })
 }
 
@@ -358,6 +381,189 @@ pub async fn message_ids(
         .into_iter()
         .map(|(id, _)| id)
         .collect())
+}
+
+/// The neighbours of one message in a folder's reading order, with the open
+/// message's position in that order. The order matches the web client's: the
+/// unread messages newest first, then the read ones newest first.
+#[derive(Debug, Default)]
+pub struct Neighbors {
+    /// The message just newer than the open one in the reading order.
+    pub previous_id: Option<Uuid>,
+    /// The message just older than the open one in the reading order.
+    pub next_id: Option<Uuid>,
+    /// One-based position of the open message in the reading order.
+    pub position: i64,
+    /// Every message the filters match.
+    pub total: i64,
+    /// One-based position among the unread messages; zero when the open message
+    /// is read.
+    pub unread_position: i64,
+    /// Every unread message the filters match.
+    pub unread_total: i64,
+}
+
+/// Which side of the open message a lookup walks.
+#[derive(Clone, Copy)]
+enum Side {
+    /// A newer message (a larger `(received_at, id)` key).
+    Newer,
+    /// An older message (a smaller `(received_at, id)` key).
+    Older,
+}
+
+/// The filter plus, optionally, one side of the open message and the unread
+/// state a lookup is restricted to.
+fn scoped_clause(
+    filters: &MessageFilters,
+    unread: Option<bool>,
+    side: Option<(Side, MessageCursor)>,
+) -> Clause {
+    let mut clause = filters.clause();
+    if let Some((side, cursor)) = side {
+        let received_at = clause.bind(cursor.received_at.into());
+        let id = clause.bind(cursor.id.into());
+        clause.and(match side {
+            Side::Newer => format!(
+                "(m.received_at > ${received_at} OR (m.received_at = ${received_at} AND m.id > ${id}))"
+            ),
+            Side::Older => format!(
+                "(m.received_at < ${received_at} OR (m.received_at = ${received_at} AND m.id < ${id}))"
+            ),
+        });
+    }
+    match unread {
+        Some(true) => clause.and(UNREAD_SQL.to_string()),
+        Some(false) => clause.and(format!("NOT {UNREAD_SQL}")),
+        None => {}
+    }
+    clause
+}
+
+/// How many rows the filters match, restricted to the unread (or read) set and
+/// to one side of the open message.
+async fn count_scoped(
+    db: &DatabaseConnection,
+    filters: &MessageFilters,
+    unread: Option<bool>,
+    side: Option<(Side, MessageCursor)>,
+) -> Result<i64> {
+    let clause = scoped_clause(filters, unread, side);
+    let sql = format!("SELECT count(*) AS count {MESSAGE_FROM} {}", clause.sql);
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &sql,
+            clause.values,
+        ))
+        .await?
+        .ok_or_else(|| anyhow!("the count query returned no row"))?;
+    Ok(row.try_get("", "count")?)
+}
+
+/// The nearest id on one side of the open message, within the unread (or read)
+/// set.
+async fn neighbor_scoped(
+    db: &DatabaseConnection,
+    filters: &MessageFilters,
+    unread: bool,
+    side: Side,
+    cursor: MessageCursor,
+) -> Result<Option<Uuid>> {
+    let clause = scoped_clause(filters, Some(unread), Some((side, cursor)));
+    let order = match side {
+        Side::Newer => "ASC",
+        Side::Older => "DESC",
+    };
+    let sql = format!(
+        "SELECT m.id AS id {MESSAGE_FROM} {} ORDER BY m.received_at {order}, m.id {order} LIMIT 1",
+        clause.sql
+    );
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &sql,
+            clause.values,
+        ))
+        .await?;
+    match row {
+        Some(row) => Ok(Some(row.try_get("", "id")?)),
+        None => Ok(None),
+    }
+}
+
+/// The newest (or oldest) id of the unread (or read) set.
+async fn edge_scoped(
+    db: &DatabaseConnection,
+    filters: &MessageFilters,
+    unread: bool,
+    newest: bool,
+) -> Result<Option<Uuid>> {
+    let clause = scoped_clause(filters, Some(unread), None);
+    let order = if newest { "DESC" } else { "ASC" };
+    let sql = format!(
+        "SELECT m.id AS id {MESSAGE_FROM} {} ORDER BY m.received_at {order}, m.id {order} LIMIT 1",
+        clause.sql
+    );
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &sql,
+            clause.values,
+        ))
+        .await?;
+    match row {
+        Some(row) => Ok(Some(row.try_get("", "id")?)),
+        None => Ok(None),
+    }
+}
+
+/// The neighbours and position of one message, walked with a handful of index
+/// lookups instead of returning the whole folder.
+///
+/// `target_unread` is the caller's view of the open message, so the report stays
+/// stable while opening the message marks it read.
+pub async fn neighbors(
+    db: &DatabaseConnection,
+    filters: &MessageFilters,
+    target: MessageCursor,
+    target_unread: bool,
+) -> Result<Neighbors> {
+    let total = count_matching(db, filters).await?;
+    let unread_total = count_scoped(db, filters, Some(true), None).await?;
+    let position = if target_unread {
+        count_scoped(db, filters, Some(true), Some((Side::Newer, target))).await? + 1
+    } else {
+        let read_newer =
+            count_scoped(db, filters, Some(false), Some((Side::Newer, target))).await?;
+        unread_total + read_newer + 1
+    };
+    // The reading order is the unread messages then the read ones, so the unread
+    // set sits before the read set: an unread message's next message is the
+    // newest read one, and a read message's previous is the oldest unread one.
+    let (previous_id, next_id) = if target_unread {
+        let previous = neighbor_scoped(db, filters, true, Side::Newer, target).await?;
+        let next = match neighbor_scoped(db, filters, true, Side::Older, target).await? {
+            Some(id) => Some(id),
+            None => edge_scoped(db, filters, false, true).await?,
+        };
+        (previous, next)
+    } else {
+        let previous = match neighbor_scoped(db, filters, false, Side::Newer, target).await? {
+            Some(id) => Some(id),
+            None => edge_scoped(db, filters, true, false).await?,
+        };
+        let next = neighbor_scoped(db, filters, false, Side::Older, target).await?;
+        (previous, next)
+    };
+    Ok(Neighbors {
+        previous_id,
+        next_id,
+        position,
+        total,
+        unread_position: if target_unread { position } else { 0 },
+        unread_total,
+    })
 }
 
 /// The state of the job that carries a stored copy out.

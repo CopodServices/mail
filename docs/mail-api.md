@@ -66,7 +66,7 @@ The client's whole reading path is served by the API today:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | /api/messages | List mail. Filters: mailbox, mailbox_id, folder, direction, q, read, starred, limit, cursor |
+| GET | /api/messages | List mail. Filters: mailbox, mailbox_id, folder, direction, q, read, starred, limit, cursor, with_total (default true; false skips the count for meta.total) |
 | GET | /api/messages/counts | Folder and mailbox totals plus unread counts, including custom folders |
 | GET | /api/messages/{id} | Message with body (text/html) and attachment list |
 | GET | /api/messages/{id}/raw | Raw RFC5322 message |
@@ -76,8 +76,9 @@ The client's whole reading path is served by the API today:
 | POST / DELETE | /api/messages/{id}/snooze | Snooze until a time, or return it now |
 | GET | /api/messages/{id}/metadata | Attachments and the unsubscribe link |
 | POST | /api/messages/{id}/cancel-schedule | Cancel a scheduled send; it returns to Drafts |
-| GET | /api/messages/navigation | Ordered ids and unread flags for the open filter |
-| GET | /api/messages/{id}/thread | The conversation, reassembled from In-Reply-To and References |
+| GET | /api/messages/navigation | Ordered ids and unread flags for the open filter (kept for operators; the web client uses /neighbors) |
+| GET | /api/messages/{id}/neighbors | The newer and older neighbours of one message in the open folder, with its position and unread position |
+| GET | /api/messages/{id}/thread | The conversation, reassembled from In-Reply-To and References; headers only, no bodies |
 | POST | /api/messages/bulk | archive, trash, spam, inbox, read, unread, starred, unstarred, folder, delete |
 | DELETE | /api/messages/{id} | Delete a message |
 | GET | /api/folders | System and custom folders |
@@ -147,6 +148,17 @@ container proxies the WebSocket upgrade through.
 The message list is keyset-paged, newest first: pass the cursor a page returned
 in meta.next_cursor to read on, and the page after it starts strictly after the
 last row it saw, so a message arriving mid-walk cannot repeat or skip a row.
+
+The list counts its rows only when asked (`with_total` defaults to true): the web
+client reads the folder totals from /api/messages/counts and passes
+with_total=false, so opening a folder is one query, not two. The reading order is
+every unread message newest first, then the read ones newest first; a message's
+neighbours and its position in that order come from
+GET /api/messages/{id}/neighbors, a handful of index lookups rather than the
+whole folder. The thread endpoint returns each member's headers alone: the open
+message's body comes from its own detail call, and a collapsed member's body is
+read only when it is expanded. Search matches the subject and envelope addresses
+with ILIKE against pg_trgm GIN indexes, so it screens a mailbox without a scan.
 
 ## Response shapes
 

@@ -5,6 +5,7 @@ import type {
 	MessageCounts,
 	MessageFolder,
 	MessageListResponse,
+	ThreadMessage,
 } from "@/hooks/types";
 
 /**
@@ -166,26 +167,19 @@ export function adaptMessageDetail(payload: ApiMessageDetail) {
 	};
 }
 
-export type ApiThreadMessage = ApiMessage & {
-	text?: string | null;
-	html?: string | null;
-	attachments?: ApiAttachment[];
-};
+/** A conversation member as the thread endpoint lists it: the message alone. */
+export type ApiThreadMessage = ApiMessage;
 
-/** A conversation member: the message plus its body and attachments. */
-export function adaptThreadMessage(dto: ApiThreadMessage) {
+/**
+ * The thread endpoint sends headers only. The open message's body comes from
+ * its own detail call, and a collapsed member loads its body when expanded, so
+ * a member adapts to an empty body here.
+ */
+export function adaptThreadMessage(dto: ApiThreadMessage): ThreadMessage {
 	return {
 		...toMessage(dto),
-		textBody: dto.text ?? null,
-		htmlBody: dto.html ?? null,
-		attachments: (dto.attachments ?? []).map((attachment) => ({
-			contentId: null,
-			disposition: "attachment" as const,
-			filename: attachment.filename ?? "attachment",
-			id: String(attachment.index),
-			messageId: dto.id,
-			size: attachment.size_bytes,
-			type: attachment.content_type ?? "application/octet-stream",
-		})),
+		textBody: null,
+		htmlBody: null,
+		attachments: [],
 	};
 }

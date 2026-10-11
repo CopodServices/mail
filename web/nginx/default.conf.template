@@ -15,6 +15,7 @@ map $http_upgrade $connection_upgrade {
 gzip on;
 gzip_vary on;
 gzip_min_length 1024;
+gzip_comp_level 6;
 gzip_types
 	text/plain
 	text/css
@@ -27,6 +28,8 @@ server {
 	listen 8080;
 	server_name _;
 	server_tokens off;
+	# Multiplex the bundle and its many small chunks over one connection.
+	http2 on;
 
 	root /usr/share/nginx/html;
 	index index.html;
@@ -70,6 +73,14 @@ server {
 	location = /manifest.webmanifest {
 		types { }
 		default_type application/manifest+json;
+	}
+
+	# The per-locale catalogs are static and versioned with the bundle.
+	location /locales/ {
+		add_header Cache-Control "public, max-age=86400" always;
+		add_header X-Content-Type-Options nosniff always;
+		add_header X-Frame-Options SAMEORIGIN always;
+		add_header Referrer-Policy strict-origin-when-cross-origin always;
 	}
 
 	location / {

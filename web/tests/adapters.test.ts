@@ -6,7 +6,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { adaptCounts, adaptMessageList } from "@/lib/api/adapters";
+import {
+	adaptCounts,
+	adaptMessageList,
+	adaptThreadMessage,
+} from "@/lib/api/adapters";
 
 /** The wire shape the adapter accepts, taken from the adapter itself. */
 type ApiMessageInput = NonNullable<
@@ -107,6 +111,28 @@ describe("message adapter", () => {
 
 		const last = adaptMessageList({ data: [], meta: { total: 0, limit: 25 } });
 		expect(last.nextCursor).toBeNull();
+	});
+
+	test("falls back to the page length when the list carries no total", () => {
+		// with_total=false: a plain folder view takes its total from /counts, so
+		// the list response has no meta.total to read.
+		const list = adaptMessageList({
+			data: [
+				apiMessage(),
+				apiMessage({ id: "0194b7c1-0000-7000-8000-000000000002" }),
+			],
+			meta: { limit: 25 },
+		});
+		expect(list.total).toBe(2);
+		expect(list.nextCursor).toBeNull();
+	});
+
+	test("a thread member carries no body until it is opened", () => {
+		const member = adaptThreadMessage(apiMessage());
+		expect(member.id).toBe("0194b7c1-0000-7000-8000-000000000001");
+		expect(member.textBody).toBeNull();
+		expect(member.htmlBody).toBeNull();
+		expect(member.attachments).toEqual([]);
 	});
 });
 
