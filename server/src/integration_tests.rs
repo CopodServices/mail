@@ -847,7 +847,7 @@ async fn a_queued_copy_reports_its_send_state() {
     .await;
 
     let due = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
-    queue_job(
+    let waiting_job = queue_job(
         &db,
         &mailbox,
         waiting,
@@ -856,7 +856,7 @@ async fn a_queued_copy_reports_its_send_state() {
         None,
     )
     .await;
-    queue_job(
+    let refused_job = queue_job(
         &db,
         &mailbox,
         refused,
@@ -865,7 +865,7 @@ async fn a_queued_copy_reports_its_send_state() {
         None,
     )
     .await;
-    queue_job(
+    let later_job = queue_job(
         &db,
         &mailbox,
         later,
@@ -900,6 +900,9 @@ async fn a_queued_copy_reports_its_send_state() {
 
     for id in ids {
         repo::delete_message(&db, id).await.unwrap();
+    }
+    for job in [waiting_job, refused_job, later_job] {
+        let _ = outbound_job::Entity::delete_by_id(job).exec(&db).await;
     }
     let _ = repo::delete_mailbox(&db, &mailbox.address).await;
     let _ = entity::domain::Entity::delete_many()
@@ -988,21 +991,9 @@ async fn auto_forwards_an_arriving_message_once() {
     let recipients: Vec<String> = serde_json::from_value(job.recipients.clone()).unwrap();
     assert_eq!(recipients, vec!["dest@remote.test".to_string()]);
 
-    // The relay only accepts a forward whose envelope sender is SRS-rewritten,
-    // and a bounce to it has to find the original sender again.
-    let (local_part, srs_domain) = job
-        .envelope_from
-        .split_once('@')
-        .expect("a rewritten envelope sender");
-    assert_eq!(srs_domain, domain);
-    let key = mailcore::srs::key(&config.session_secret);
-    assert_eq!(
-        mailcore::srs::decode(local_part, srs_domain, &key, chrono::Utc::now().timestamp())
-            .as_deref(),
-        Some("sender@remote.test")
-    );
-
-    // The message itself goes out untouched, so its own DKIM signature survives.
+    // The relay refuses a From domain it has not verified, so the copy goes out
+    // as the mailbox with the original sender left reachable on Reply-To.
+    assert_eq!(job.envelope_from, address);
     let payload = store
         .get(&job.storage_key)
         .await
@@ -1013,40 +1004,18 @@ async fn auto_forwards_an_arriving_message_once() {
         "the copy is marked so it cannot loop"
     );
     assert!(
-        text.contains("From: sender@remote.test"),
-        "the forwarded message keeps its own headers: {text}"
+        text.contains(&format!("\r\nFrom: {address}\r\n")),
+        "the copy is sent as the mailbox: {text}"
+    );
+    assert!(
+        text.contains("Reply-To: sender@remote.test"),
+        "the original sender is still reachable: {text}"
+    );
+    assert!(
+        !text.contains("From: sender@remote.test"),
+        "the old sender is not the From the relay sees: {text}"
     );
     assert!(text.contains("body line"));
-
-    // A bounce for the forward arrives at the rewritten address and is relayed
-    // to the original sender instead of being stored for a mailbox here.
-    deliver_inbound(
-        addr,
-        "",
-        &job.envelope_from,
-        &[
-            "From: mailer-daemon@remote.test",
-            "Subject: undeliverable",
-            "",
-            "no such user",
-        ],
-    )
-    .await;
-    // The bounce is a relay of its own, not a send owned by the mailbox.
-    let scoped = outbound_job::Entity::find()
-        .filter(outbound_job::Column::MailboxId.eq(mailbox.id))
-        .all(&db)
-        .await
-        .unwrap();
-    assert_eq!(scoped.len(), 1, "the bounce is not owned by the mailbox");
-    let bounce = outbound_job::Entity::find()
-        .filter(outbound_job::Column::EnvelopeFrom.eq(""))
-        .one(&db)
-        .await
-        .unwrap()
-        .expect("the bounce is queued with the null sender");
-    let recipients: Vec<String> = serde_json::from_value(bounce.recipients.clone()).unwrap();
-    assert_eq!(recipients, vec!["sender@remote.test".to_string()]);
 
     // Clean up the fixtures, including the stored arrivals and the forwarded copy.
     let arrivals = message::Entity::find()
@@ -1054,16 +1023,11 @@ async fn auto_forwards_an_arriving_message_once() {
         .all(&db)
         .await
         .unwrap();
-    assert_eq!(arrivals.len(), 2, "the bounce is not stored here");
     for row in &arrivals {
         let _ = store.delete(&row.storage_key).await;
     }
     let _ = store.delete(&job.storage_key).await;
     let _ = outbound_job::Entity::delete_by_id(job.id).exec(&db).await;
-    let _ = store.delete(&bounce.storage_key).await;
-    let _ = outbound_job::Entity::delete_by_id(bounce.id)
-        .exec(&db)
-        .await;
     for row in arrivals {
         let _ = repo::delete_message(&db, row.id).await;
     }
@@ -1233,6 +1197,7 @@ async fn preview_serves_only_renderable_attachments_inline() {
 }
 
 /// Queues a job for a stored copy: the fixture does not need object storage.
+/// Returns the job id so the test can take its fixture back out of the queue.
 async fn queue_job(
     db: &sea_orm::DatabaseConnection,
     mailbox: &entity::mailbox::Model,
@@ -1240,12 +1205,13 @@ async fn queue_job(
     status: outbound_job::JobStatus,
     last_error: Option<&str>,
     scheduled_at: Option<chrono::DateTime<Utc>>,
-) {
+) -> Uuid {
     let now = Utc::now();
+    let id = Uuid::now_v7();
     repo::enqueue_job(
         db,
         outbound_job::ActiveModel {
-            id: Set(Uuid::now_v7()),
+            id: Set(id),
             mailbox_id: Set(Some(mailbox.id)),
             envelope_from: Set(mailbox.address.clone()),
             recipients: Set(serde_json::json!(["remote@elsewhere.test"])),
@@ -1263,6 +1229,7 @@ async fn queue_job(
     )
     .await
     .unwrap();
+    id
 }
 
 /// Stores a message row directly: the fixture does not need object storage.

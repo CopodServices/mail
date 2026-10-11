@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use entity::{mailbox, message, outbound_job};
 use mailcore::policy::AuthOutcome;
-use mailcore::{address, meta, repo, srs, store};
+use mailcore::{address, meta, repo, store};
 use sea_orm::Set;
 use uuid::Uuid;
 
@@ -108,7 +108,7 @@ pub async fn store_local(
     // Auto-forward: a copy of an arriving message goes to the mailbox's
     // configured address. Losing the forward must not lose the delivery, so a
     // failure is logged and the stored copy is left alone.
-    if inbound && let Err(err) = forward_inbound(state, mailbox, envelope_from, raw).await {
+    if inbound && let Err(err) = forward_inbound(state, mailbox, raw).await {
         tracing::warn!(error = %err, mailbox = %mailbox.address, "failed to queue the auto-forward");
     }
 
@@ -117,14 +117,14 @@ pub async fn store_local(
 
 /// Queues one copy of an arriving message to the mailbox's auto-forward address.
 ///
-/// The relay only accepts a forward whose envelope sender has been rewritten
-/// with SRS: the original sender is encoded into one of our own addresses, which
-/// a bounce can come back to, while the message keeps its own headers and its DKIM
-/// signature. Returns the queued job id, or None when there is nothing to forward.
+/// The relay refuses a message whose From domain it has not verified, so the
+/// mailbox's own address becomes the From and the original sender moves to
+/// Reply-To. The message is otherwise copied through, without the headers that
+/// no longer describe it. Returns the queued job id, or None when there is
+/// nothing to forward.
 pub async fn forward_inbound(
     state: &AppState,
     mailbox: &mailbox::Model,
-    envelope_from: &str,
     raw: &[u8],
 ) -> Result<Option<Uuid>> {
     let Some(target) = mailbox
@@ -148,30 +148,11 @@ pub async fn forward_inbound(
         return Ok(None);
     }
 
-    // The rewritten sender has to live on a domain the relay has verified, so
-    // the mailbox's own domain is used. A sender that cannot be rewritten, the
-    // null sender of a bounce, falls back to the mailbox itself.
-    let forward_domain = mailbox
-        .address
-        .rsplit_once('@')
-        .map(|(_, domain)| domain)
-        .unwrap_or(&mailbox.address);
-    let srs_key = srs::key(&state.config.session_secret);
-    let envelope = srs::encode(
-        envelope_from,
-        forward_domain,
-        &srs_key,
-        chrono::Utc::now().timestamp(),
-    )
-    .unwrap_or_else(|| mailbox.address.clone());
-
-    // The message goes out byte for byte with only the loop marker on top, so the
-    // sender's DKIM signature still validates at the destination.
-    let forwarded = mark_forwarded(raw, &mailbox.address);
+    let forwarded = rewrite_for_forward(raw, &mailbox.address, mailbox.display_name.as_deref());
     let job = enqueue_remote(
         state,
         Some(mailbox.id),
-        &envelope,
+        &mailbox.address,
         std::slice::from_ref(&target),
         &forwarded,
         None,
@@ -198,12 +179,97 @@ fn already_forwarded(raw: &[u8]) -> bool {
     false
 }
 
-/// The forwarded bytes: the received message with the loop marker on top. The
-/// rest of the message is untouched, so its DKIM signature stays valid.
-fn mark_forwarded(raw: &[u8], from: &str) -> Vec<u8> {
-    let mut marked = format!("{FORWARD_MARKER}: {from}\r\n").into_bytes();
-    marked.extend_from_slice(raw);
-    marked
+/// Headers of the received copy that must not survive a forward: the original
+/// sender's identity, and the signatures and traces taken over it. The copy goes
+/// out again as the mailbox's own message, so a signature over the old From
+/// would not validate and a Received chain would describe a different delivery.
+const DROPPED_FORWARD_HEADERS: [&str; 9] = [
+    "from",
+    "sender",
+    "return-path",
+    "received",
+    "authentication-results",
+    "dkim-signature",
+    "arc-seal",
+    "arc-message-signature",
+    "arc-authentication-results",
+];
+
+/// Rewrites a received message for an auto-forward.
+///
+/// The mailbox's own address becomes the From, because the relay refuses a
+/// message whose From domain it has not verified; the original sender moves to
+/// Reply-To so replying still reaches them; the marker keeps a copy that loops
+/// back from being forwarded again; and the headers that no longer describe the
+/// message are dropped. The body is copied byte for byte.
+fn rewrite_for_forward(raw: &[u8], address: &str, display_name: Option<&str>) -> Vec<u8> {
+    let (headers, body) = split_headers(raw);
+    let mut kept: Vec<&str> = Vec::new();
+    let mut original_from: Option<String> = None;
+    let mut dropping = false;
+    for line in headers.lines() {
+        // A folded continuation belongs to the header above it.
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            let name = line
+                .split_once(':')
+                .map(|(name, _)| name.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            if name == "from" && original_from.is_none() {
+                original_from = line
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().to_string());
+            }
+            dropping = DROPPED_FORWARD_HEADERS.contains(&name.as_str());
+        }
+        if !dropping {
+            kept.push(line);
+        }
+    }
+
+    let from = match display_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => format!("\"{}\" <{address}>", name.replace('"', "")),
+        None => address.to_string(),
+    };
+    // A From header may carry a display name, which the envelope parser does not
+    // read; the metadata extractor returns the bare address.
+    let reply_to = meta::extract(raw)
+        .header_from
+        .and_then(|value| address::parse(&value))
+        .or_else(|| original_from.as_deref().and_then(address::parse))
+        .map(|parsed| parsed.normalized());
+
+    let mut out = Vec::with_capacity(raw.len() + 160);
+    out.extend_from_slice(format!("{FORWARD_MARKER}: {address}\r\nFrom: {from}\r\n").as_bytes());
+    if let Some(reply_to) = reply_to {
+        out.extend_from_slice(format!("Reply-To: {reply_to}\r\n").as_bytes());
+    }
+    for line in kept {
+        out.extend_from_slice(line.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(body);
+    out
+}
+
+/// Splits a stored message into its header block and the body after it.
+fn split_headers(raw: &[u8]) -> (String, &[u8]) {
+    if let Some(position) = find_bytes(raw, b"\r\n\r\n") {
+        let (headers, rest) = raw.split_at(position);
+        return (String::from_utf8_lossy(headers).to_string(), &rest[4..]);
+    }
+    if let Some(position) = find_bytes(raw, b"\n\n") {
+        let (headers, rest) = raw.split_at(position);
+        return (String::from_utf8_lossy(headers).to_string(), &rest[2..]);
+    }
+    (String::from_utf8_lossy(raw).to_string(), b"")
+}
+
+/// The offset of the first occurrence of a byte needle in a haystack, if any.
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// Stores an outgoing copy and queues it for relay delivery.
@@ -293,7 +359,7 @@ fn exceeds_quota(used: i64, incoming: i64, quota: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{already_forwarded, exceeds_quota, mark_forwarded};
+    use super::{already_forwarded, exceeds_quota, rewrite_for_forward};
 
     #[test]
     fn a_zero_quota_is_unlimited() {
@@ -310,8 +376,59 @@ mod tests {
     fn a_marked_message_is_recognised_even_past_a_folded_header() {
         let raw = b"From: a@example.test\r\nSubject: hi\r\n\r\nbody\r\n";
         assert!(!already_forwarded(raw));
-        let forwarded = mark_forwarded(raw, "inbox@example.test");
+        let forwarded = rewrite_for_forward(raw, "inbox@example.test", None);
         assert!(already_forwarded(&forwarded));
+    }
+
+    #[test]
+    fn a_forward_is_sent_as_the_mailbox_with_the_sender_as_reply_to() {
+        let raw = concat!(
+            "Received: from mail.remote.test\r\n",
+            "From: Alice <alice@remote.test>\r\n",
+            "To: inbox@example.test\r\n",
+            "Subject: hi\r\n",
+            "DKIM-Signature: v=1; d=remote.test\r\n",
+            "\r\n",
+            "body line\r\n",
+        )
+        .as_bytes();
+        let forwarded = rewrite_for_forward(raw, "inbox@example.test", Some("Inbox"));
+        let text = String::from_utf8_lossy(&forwarded);
+        assert!(
+            text.starts_with("X-Copod-Auto-Forwarded: inbox@example.test\r\n"),
+            "{text}"
+        );
+        assert!(text.contains("\r\nFrom: \"Inbox\" <inbox@example.test>\r\n"));
+        assert!(text.contains("\r\nReply-To: alice@remote.test\r\n"));
+        // The identity the relay would refuse, and the traces over it, are gone.
+        assert!(!text.contains("From: Alice"));
+        assert!(!text.to_lowercase().contains("dkim-signature"));
+        assert!(!text.to_lowercase().contains("received:"));
+        // The rest of the message survives, body included.
+        assert!(text.contains("\r\nSubject: hi\r\n"));
+        assert!(text.ends_with("body line\r\n"));
+    }
+
+    #[test]
+    fn a_folded_sender_header_is_dropped_whole() {
+        let raw = b"From: Alice\r\n <alice@remote.test>\r\nSubject: hi\r\n\r\nbody";
+        let forwarded = rewrite_for_forward(raw, "inbox@example.test", None);
+        let text = String::from_utf8_lossy(&forwarded);
+        assert!(text.contains("\r\nFrom: inbox@example.test\r\n"));
+        // The folded original goes away (the address is read out of it first).
+        assert!(!text.contains("From: Alice"), "{text}");
+        assert!(text.contains("\r\nReply-To: alice@remote.test\r\n"));
+        assert!(text.contains("\r\nSubject: hi\r\n"));
+    }
+
+    #[test]
+    fn a_forward_of_a_message_without_a_sender_invents_no_reply_to() {
+        let raw = b"Subject: hi\r\n\r\nbody";
+        let forwarded = rewrite_for_forward(raw, "inbox@example.test", None);
+        let text = String::from_utf8_lossy(&forwarded);
+        assert!(text.contains("\r\nFrom: inbox@example.test\r\n"));
+        assert!(!text.contains("Reply-To:"));
+        assert!(text.ends_with("body"));
     }
 
     #[test]

@@ -6,7 +6,6 @@ use entity::message;
 use mailcore::address;
 use mailcore::policy::{self, AuthAction, AuthOutcome};
 use mailcore::repo;
-use mailcore::srs;
 use mailcore::stream::{Conn, InboundStream};
 use smtp_proto::response::generate::BitToString;
 use smtp_proto::{Request, Response};
@@ -380,19 +379,6 @@ impl Session {
         };
 
         if mailbox.is_none() && self.mode == Mode::Inbound {
-            // A bounce for a forwarded message comes back to the envelope sender
-            // this service wrote; it belongs to the original sender, not to a
-            // mailbox here, so it is relayed on. Only an address signed here can
-            // decode, so nothing else is let through.
-            if let Some((local_part, domain)) = normalized.split_once('@')
-                && let Some(target) = self.srs_target(local_part, domain).await
-            {
-                self.recipients.push(Recipient {
-                    address: target,
-                    mailbox: None,
-                });
-                return self.reply(250, 2, 1, 5, "Recipient OK").await;
-            }
             return self.reply(550, 5, 1, 1, "No such user here").await;
         }
 
@@ -401,24 +387,6 @@ impl Session {
             mailbox,
         });
         self.reply(250, 2, 1, 5, "Recipient OK").await
-    }
-
-    /// The original sender behind a rewritten address, when the address is one
-    /// this service wrote for a domain it hosts and serves. A bounce addressed
-    /// to it is relayed to that sender.
-    async fn srs_target(&self, local_part: &str, domain: &str) -> Option<String> {
-        if !local_part.to_ascii_lowercase().starts_with("srs0=") {
-            return None;
-        }
-        if !repo::find_domain(&self.state.db, domain)
-            .await
-            .ok()?
-            .is_some_and(|row| row.active)
-        {
-            return None;
-        }
-        let key = srs::key(&self.state.config.session_secret);
-        srs::decode(local_part, domain, &key, chrono::Utc::now().timestamp())
     }
 
     async fn handle_data(&mut self) -> io::Result<()> {

@@ -9,7 +9,6 @@ pub mod query;
 pub mod queue;
 pub mod relay;
 pub mod repo;
-pub mod srs;
 pub mod store;
 pub mod stream;
 pub mod tls;
