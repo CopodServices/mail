@@ -85,5 +85,21 @@ services:
       - "3002:8080"
     depends_on:
       - mail
+  # Antispam state: greylisting, per-IP rate limits, DNSBL negative cache.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+
+  # Antivirus scanner for the spam engine (clamd on 3310).
+  clamav:
+    image: clamav/clamav:stable
+    ports:
+      - "3310:3310"
+    volumes:
+      - clamdata:/var/lib/clamav
+
 volumes:
   pgdata:
+  clamdata:

@@ -46,6 +46,10 @@ pub struct Model {
     pub dkim_result: Option<String>,
     pub dmarc_result: Option<String>,
     pub dmarc_policy: Option<String>,
+    /// The spam verdict recorded for this copy, when the filter scored it.
+    pub spam_score: Option<f64>,
+    pub spam_tags: Option<String>,
+    pub spam_action: Option<String>,
     pub received_at: chrono::DateTime<Utc>,
 }
 

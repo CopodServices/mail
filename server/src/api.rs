@@ -118,6 +118,7 @@ fn contacts_router() -> OpenApiRouter<AppState> {
         .routes(routes!(get_contact))
         .routes(routes!(update_contact))
         .routes(routes!(block_contact))
+        .routes(routes!(update_contact_spam_list))
         .routes(routes!(get_contact_avatar))
         .routes(routes!(upload_contact_avatar))
         .routes(routes!(delete_contact_avatar))
@@ -148,6 +149,8 @@ fn send_router() -> OpenApiRouter<AppState> {
         .routes(routes!(update_shortcuts_setting))
         .routes(routes!(get_recipient_addresses_setting))
         .routes(routes!(update_recipient_addresses_setting))
+        .routes(routes!(get_spam_setting))
+        .routes(routes!(update_spam_setting))
 }
 
 async fn health() -> &'static str {
@@ -607,6 +610,10 @@ pub struct MessageResponse {
     pub dkim_result: Option<String>,
     pub dmarc_result: Option<String>,
     pub dmarc_policy: Option<String>,
+    /// The spam verdict recorded for this copy, when the filter scored it.
+    pub spam_score: Option<f64>,
+    pub spam_tags: Option<String>,
+    pub spam_action: Option<String>,
     pub received_at: chrono::DateTime<chrono::Utc>,
     pub read: bool,
     pub starred: bool,
@@ -730,6 +737,9 @@ impl From<message::Model> for MessageResponse {
             dkim_result: model.dkim_result,
             dmarc_result: model.dmarc_result,
             dmarc_policy: model.dmarc_policy,
+            spam_score: model.spam_score,
+            spam_tags: model.spam_tags,
+            spam_action: model.spam_action,
             received_at: model.received_at,
             read: false,
             starred: false,
@@ -1152,6 +1162,8 @@ async fn upsert_flag(
         .one(&state.db)
         .await
         .map_err(db_error)?;
+    let previous = existing.as_ref().map(|flag| flag.folder.clone());
+    let requested = folder.clone();
     let model = message_flag::ActiveModel {
         message_id: Set(message_id),
         read: Set(read
@@ -1169,11 +1181,44 @@ async fn upsert_flag(
         updated_at: Set(chrono::Utc::now()),
     };
     // The row keyed by message_id may already exist, so update instead of insert.
-    if existing.is_some() {
-        model.update(&state.db).await.map_err(db_error)
+    let row = if existing.is_some() {
+        model.update(&state.db).await.map_err(db_error)?
     } else {
-        model.insert(&state.db).await.map_err(db_error)
+        model.insert(&state.db).await.map_err(db_error)?
+    };
+    if let Some(next) = requested.as_deref() {
+        spawn_training(state, message_id, previous.as_deref(), next);
     }
+    Ok(row)
+}
+
+/// Trains the classifier when a message moves into or out of the spam folder.
+fn spawn_training(state: &AppState, message_id: Uuid, previous: Option<&str>, next: &str) {
+    let Some(engine) = state.spam.clone() else {
+        return;
+    };
+    let spam = match (previous, next) {
+        (Some("spam"), "spam") => return,
+        (_, "spam") => true,
+        (Some("spam"), _) => false,
+        _ => return,
+    };
+    let db = state.db.clone();
+    let store = state.store.clone();
+    tokio::spawn(async move {
+        let Ok(Some(message)) = repo::get_message(&db, message_id).await else {
+            return;
+        };
+        let Ok(raw) = store.get(&message.storage_key).await else {
+            return;
+        };
+        let tokens = engine.tokens_for(&raw);
+        if tokens.is_empty() {
+            return;
+        }
+        engine.learn_tokens(message.mailbox_id, &tokens, spam);
+        crate::spam_store::record_sample(&db, message.mailbox_id, &tokens, spam).await;
+    });
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -2556,6 +2601,9 @@ pub async fn create_draft(
             dkim_result: Set(None),
             dmarc_result: Set(None),
             dmarc_policy: Set(None),
+            spam_score: Set(None),
+            spam_tags: Set(None),
+            spam_action: Set(None),
             received_at: Set(now),
         },
     )
@@ -2833,6 +2881,7 @@ async fn settings_row(state: &AppState, scope: &str) -> Result<setting::Model, A
         scope: Set(scope.to_string()),
         keyboard_shortcuts_enabled: Set(true),
         show_full_recipient_addresses: Set(false),
+        spam_threshold: Set(None),
         updated_at: Set(chrono::Utc::now()),
     }
     .insert(&state.db)
@@ -3075,6 +3124,111 @@ pub async fn update_recipient_addresses_setting(
 /// The settings another mail app needs to send as this mailbox and, when the
 /// readers are configured, to read it over IMAP or POP3.
 #[derive(Debug, Serialize, ToSchema)]
+pub struct SpamSettingResponse {
+    /// This mailbox's junk threshold; null means the global default applies.
+    pub threshold: Option<f64>,
+    /// The global threshold from the server configuration.
+    pub default_threshold: f64,
+    /// Senders never filed as junk.
+    pub allow: Vec<String>,
+    /// Senders always filed as junk.
+    pub block: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SpamSettingRequest {
+    /// New junk threshold for this mailbox, or null to follow the default.
+    #[serde(default)]
+    pub threshold: Option<f64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/settings/spam",
+    tag = "send",
+    responses((status = 200, description = "Junk threshold", body = DataResponse<SpamSettingResponse>))
+)]
+pub async fn get_spam_setting(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Result<Response, ApiError> {
+    let row = settings_row(&state, settings_scope(&principal)).await?;
+    let (allow, block) = spam_lists(&state, principal.mailbox_scope()).await?;
+    Ok(Json(DataResponse {
+        data: SpamSettingResponse {
+            threshold: row.spam_threshold,
+            default_threshold: default_junk_threshold(&state),
+            allow,
+            block,
+        },
+    })
+    .into_response())
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/settings/spam",
+    tag = "send",
+    request_body = SpamSettingRequest,
+    responses((status = 200, description = "Updated junk threshold", body = DataResponse<SpamSettingResponse>))
+)]
+pub async fn update_spam_setting(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(body): Json<SpamSettingRequest>,
+) -> Result<Response, ApiError> {
+    let row = settings_row(&state, settings_scope(&principal)).await?;
+    let mut active: setting::ActiveModel = row.into();
+    active.spam_threshold = Set(body.threshold);
+    active.updated_at = Set(chrono::Utc::now());
+    let row = active.update(&state.db).await.map_err(db_error)?;
+    let (allow, block) = spam_lists(&state, principal.mailbox_scope()).await?;
+    Ok(Json(DataResponse {
+        data: SpamSettingResponse {
+            threshold: row.spam_threshold,
+            default_threshold: default_junk_threshold(&state),
+            allow,
+            block,
+        },
+    })
+    .into_response())
+}
+
+/// The global junk threshold, or the built-in default when the filter is off.
+fn default_junk_threshold(state: &AppState) -> f64 {
+    state
+        .spam
+        .as_ref()
+        .map(|engine| engine.junk_threshold() as f64)
+        .unwrap_or(5.0)
+}
+
+/// The mailbox's sender allow and block lists.
+async fn spam_lists(
+    state: &AppState,
+    mailbox_id: Option<Uuid>,
+) -> Result<(Vec<String>, Vec<String>), ApiError> {
+    let Some(mailbox_id) = mailbox_id else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let rows = contact::Entity::find()
+        .filter(contact::Column::MailboxId.eq(mailbox_id))
+        .all(&state.db)
+        .await
+        .map_err(db_error)?;
+    let mut allow = Vec::new();
+    let mut block = Vec::new();
+    for row in rows {
+        if row.allowed {
+            allow.push(row.address.clone());
+        } else if row.blocked {
+            block.push(row.address.clone());
+        }
+    }
+    Ok((allow, block))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ClientConnectionResponse {
     /// Submission host a mail app connects to.
     pub smtp_host: String,
@@ -3232,6 +3386,88 @@ async fn contact_mailbox(
     .ok_or_else(|| bad_request("A mailbox is required"))
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SpamListRequest {
+    pub mailbox: Option<String>,
+    pub mailbox_id: Option<Uuid>,
+    pub address: String,
+    /// allow (never junk), block (always junk) or none (clear both).
+    pub kind: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/contacts/spam-list",
+    tag = "mailboxes",
+    request_body = SpamListRequest,
+    responses((status = 200, description = "Updated spam list", body = DataResponse<ContactResponse>))
+)]
+pub async fn update_contact_spam_list(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(body): Json<SpamListRequest>,
+) -> Result<Response, ApiError> {
+    let mailbox_id = contact_mailbox(
+        &state,
+        &body.mailbox,
+        body.mailbox_id,
+        principal.mailbox_scope(),
+    )
+    .await?;
+    let (blocked, allowed) = match body.kind.trim().to_ascii_lowercase().as_str() {
+        "allow" => (false, true),
+        "block" => (true, false),
+        "none" | "clear" => (false, false),
+        _ => return Err(bad_request("kind must be allow, block or none")),
+    };
+    let row = set_spam_list(&state, mailbox_id, &body.address, blocked, allowed).await?;
+    Ok(Json(DataResponse {
+        data: contact_response(&row),
+    })
+    .into_response())
+}
+
+async fn set_spam_list(
+    state: &AppState,
+    mailbox_id: Uuid,
+    address: &str,
+    blocked: bool,
+    allowed: bool,
+) -> Result<contact::Model, ApiError> {
+    let address = address.trim().to_ascii_lowercase();
+    if address::parse(&address).is_none() {
+        return Err(bad_request("Invalid email address"));
+    }
+    let now = chrono::Utc::now();
+    match find_contact(state, mailbox_id, &address).await? {
+        Some(row) => {
+            let mut active: contact::ActiveModel = row.into();
+            active.blocked = Set(blocked);
+            active.allowed = Set(allowed);
+            active.updated_at = Set(now);
+            active.update(&state.db).await.map_err(db_error)
+        }
+        None => contact::ActiveModel {
+            id: Set(Uuid::now_v7()),
+            mailbox_id: Set(mailbox_id),
+            address: Set(address),
+            display_name: Set(None),
+            avatar_key: Set(None),
+            preview_key: Set(None),
+            avatar_content_type: Set(None),
+            blocked: Set(blocked),
+            allowed: Set(allowed),
+            source: Set("manual".to_string()),
+            last_seen_at: Set(now),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(&state.db)
+        .await
+        .map_err(db_error),
+    }
+}
+
 async fn find_contact(
     state: &AppState,
     mailbox_id: Uuid,
@@ -3284,6 +3520,7 @@ async fn upsert_contact(
             preview_key: Set(None),
             avatar_content_type: Set(None),
             blocked: Set(blocked.unwrap_or(false)),
+            allowed: Set(false),
             source: Set(source.unwrap_or("manual").to_string()),
             last_seen_at: Set(now),
             created_at: Set(now),

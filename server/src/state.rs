@@ -1,5 +1,6 @@
 use mail_auth::MessageAuthenticator;
 use mailcore::config::Config;
+use mailcore::spam::SpamEngine;
 use mailcore::store::MailStore;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
@@ -11,6 +12,8 @@ pub struct AppState {
     pub store: MailStore,
     /// None when DNS verification is disabled or the resolver could not start.
     pub authenticator: Option<Arc<MessageAuthenticator>>,
+    /// None when spam filtering is off.
+    pub spam: Option<Arc<SpamEngine>>,
     pub tls: Option<Arc<rustls::ServerConfig>>,
     /// Live updates for connected clients; each message is a JSON frame.
     pub events: tokio::sync::broadcast::Sender<String>,

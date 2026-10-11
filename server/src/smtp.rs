@@ -327,6 +327,15 @@ impl Session {
         if self.helo.is_none() {
             return self.reply(503, 5, 5, 1, "Send HELO/EHLO first").await;
         }
+        // Per-IP message rate limiting, when the spam engine enables it.
+        if self.mode == Mode::Inbound
+            && let Some(engine) = self.state.spam.as_ref()
+            && engine.rate_exceeded(self.peer.ip()).await
+        {
+            return self
+                .reply(452, 4, 7, 0, "Too many messages, try again later")
+                .await;
+        }
         self.reset_envelope();
         let parsed = address::parse(raw);
 
@@ -382,6 +391,23 @@ impl Session {
             return self.reply(550, 5, 1, 1, "No such user here").await;
         }
 
+        // Greylisting defers a first-seen sender so a retry can prove itself.
+        if self.mode == Mode::Inbound
+            && mailbox.is_some()
+            && let Some(engine) = self.state.spam.as_ref()
+            && engine
+                .greylist_defer(
+                    self.peer.ip(),
+                    self.mail_from.as_deref().unwrap_or_default(),
+                    &normalized,
+                )
+                .await
+        {
+            return self
+                .reply(450, 4, 7, 1, "Greylisted, try again shortly")
+                .await;
+        }
+
         self.recipients.push(Recipient {
             address: normalized,
             mailbox,
@@ -417,6 +443,11 @@ impl Session {
                 .reply(550, 5, 7, 1, "Message rejected by DMARC policy")
                 .await;
         }
+
+        let verdict = match self.mode {
+            Mode::Inbound => self.scan_spam(&raw, &outcome).await,
+            Mode::Submission => None,
+        };
 
         let envelope_from = self.mail_from.clone().unwrap_or_default();
         let recipients = std::mem::take(&mut self.recipients);
@@ -483,7 +514,10 @@ impl Session {
                 Mode::Submission => &copy,
                 Mode::Inbound => &raw,
             };
-            if let Err(err) = delivery::store_local(
+            let quarantine = self
+                .quarantine_for(mailbox, verdict.as_ref(), &envelope_from)
+                .await;
+            if let Err(err) = delivery::store_local_with_spam(
                 &self.state,
                 mailbox,
                 message::Direction::Inbound,
@@ -491,6 +525,8 @@ impl Session {
                 &mailbox.address,
                 payload,
                 &outcome,
+                verdict.as_ref(),
+                quarantine,
             )
             .await
             {
@@ -571,6 +607,60 @@ impl Session {
             &self.state.config.hostname,
         )
         .await
+    }
+
+    /// Score the message with the spam engine, when filtering is on.
+    async fn scan_spam(
+        &self,
+        raw: &[u8],
+        outcome: &AuthOutcome,
+    ) -> Option<mailcore::spam::Verdict> {
+        let engine = self.state.spam.as_ref()?;
+        let recipients: Vec<String> = self
+            .recipients
+            .iter()
+            .map(|recipient| recipient.address.clone())
+            .collect();
+        let helo = self.helo.clone().unwrap_or_else(|| "unknown".to_string());
+        let mail_from = self.mail_from.clone().unwrap_or_default();
+        Some(
+            engine
+                .scan_raw(
+                    raw,
+                    self.peer.ip(),
+                    &helo,
+                    &mail_from,
+                    &self.state.config.hostname,
+                    &recipients,
+                    outcome,
+                    None,
+                )
+                .await,
+        )
+    }
+
+    /// File this recipient's copy as junk when the spam verdict applies to it.
+    async fn quarantine_for(
+        &self,
+        mailbox: &entity::mailbox::Model,
+        verdict: Option<&mailcore::spam::Verdict>,
+        sender: &str,
+    ) -> bool {
+        let (Some(engine), Some(verdict)) = (self.state.spam.as_ref(), verdict) else {
+            return false;
+        };
+        if !engine.is_quarantine_mode() {
+            return false;
+        }
+        let policy = repo::spam_policy(&self.state.db, mailbox.id, &mailbox.address, sender)
+            .await
+            .unwrap_or_default();
+        mailcore::spam::should_quarantine(
+            verdict.score,
+            verdict.malware,
+            engine.junk_threshold() as f64,
+            &policy,
+        )
     }
 }
 

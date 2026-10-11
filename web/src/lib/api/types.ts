@@ -17,6 +17,18 @@ export type BulkMessageAction =
 /** Folders whose messages can be permanently deleted or emptied in one go. */
 export type PermanentDeleteFolder = "trash" | "spam";
 
+/** One mailbox's junk threshold and sender allow/block lists, from GET /api/settings/spam. */
+export type SpamSettings = {
+	/** This mailbox's override; null means the global default applies. */
+	threshold: number | null;
+	defaultThreshold: number;
+	allow: string[];
+	block: string[];
+};
+
+/** How a sender is filed: never junk, always junk, or neither. */
+export type SpamListKind = "allow" | "block" | "none";
+
 export type EmptyFolderResponse = {
 	ok?: boolean;
 	deleted?: number;

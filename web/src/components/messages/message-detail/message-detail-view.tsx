@@ -31,6 +31,7 @@ import { PreviousMessage } from "@/components/previous-message";
 import { splitEmailAddressList } from "@/lib/email/address";
 import { formatUserDate } from "@/lib/time/utils";
 import { extractCloudAttachments } from "./cloud-attachment-utils";
+import { SpamScoreDetails } from "./spam-score-details";
 import type { MessageAttachment, MessageDetailResponse } from "./types";
 import { useMessageContentScroll } from "./use-message-content-scroll";
 import {
@@ -214,16 +215,17 @@ export function MessageDetailView({ messageId }: { messageId: string }) {
 				>
 					{message.subject ?? t("list.noSubject")}
 				</h1>
-				{/* <div className="px-6">
-        <div className="mx-auto w-full max-w-[640px]">
-          <SpamScoreDetails
-            score={message.spamScore}
-            verdict={message.spamVerdict}
-            signals={message.spamSignals}
-            analysisError={message.spamAnalysisError}
-          />
-        </div>
-      </div> */}
+				{(message.spamScore != null || message.spamSignals) && (
+					<div className="px-6">
+						<div className="mx-auto w-full max-w-[640px]">
+							<SpamScoreDetails
+								score={message.spamScore}
+								verdict={message.spamVerdict}
+								signals={message.spamSignals}
+							/>
+						</div>
+					</div>
+				)}
 				<ConversationThread
 					currentMessageId={message.id}
 					position={latestMessagesFirst ? "after" : "before"}

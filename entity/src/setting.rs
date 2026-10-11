@@ -12,6 +12,8 @@ pub struct Model {
     pub scope: String,
     pub keyboard_shortcuts_enabled: bool,
     pub show_full_recipient_addresses: bool,
+    /// Per-mailbox junk threshold; null means the global default applies.
+    pub spam_threshold: Option<f64>,
     pub updated_at: chrono::DateTime<Utc>,
 }
 

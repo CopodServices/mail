@@ -3,6 +3,8 @@ import type {
 	BulkMessageAction,
 	ClientConnection,
 	MailboxStorage,
+	SpamListKind,
+	SpamSettings,
 } from "./types";
 
 /**
@@ -17,6 +19,59 @@ import type {
 type Envelope<T> = { data?: T };
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
+
+type ApiSpamSettings = {
+	threshold?: number | null;
+	default_threshold?: number;
+	allow?: string[];
+	block?: string[];
+};
+
+function toSpamSettings(data: ApiSpamSettings): SpamSettings {
+	return {
+		threshold: data.threshold ?? null,
+		defaultThreshold: data.default_threshold ?? 5,
+		allow: data.allow ?? [],
+		block: data.block ?? [],
+	};
+}
+
+/** This mailbox's junk threshold and sender allow/block lists. */
+export async function fetchSpamSettings(): Promise<SpamSettings> {
+	const response = await apiFetch("/api/settings/spam");
+	if (!response.ok) throw new Error("Unable to load the spam settings");
+	const body = (await response.json()) as { data?: ApiSpamSettings };
+	if (!body.data) throw new Error("Unable to load the spam settings");
+	return toSpamSettings(body.data);
+}
+
+/** Sets this mailbox's junk threshold; null follows the global default. */
+export async function updateSpamThreshold(
+	threshold: number | null,
+): Promise<SpamSettings> {
+	const response = await apiFetch("/api/settings/spam", {
+		method: "PATCH",
+		headers: JSON_HEADERS,
+		body: JSON.stringify({ threshold }),
+	});
+	if (!response.ok) throw new Error("Unable to save the spam threshold");
+	const body = (await response.json()) as { data?: ApiSpamSettings };
+	if (!body.data) throw new Error("Unable to save the spam threshold");
+	return toSpamSettings(body.data);
+}
+
+/** Adds a sender to the allow or block list, or clears both with "none". */
+export async function updateSpamList(
+	address: string,
+	kind: SpamListKind,
+): Promise<void> {
+	const response = await apiFetch("/api/contacts/spam-list", {
+		method: "POST",
+		headers: JSON_HEADERS,
+		body: JSON.stringify({ address, kind }),
+	});
+	if (!response.ok) throw new Error("Unable to update the spam list");
+}
 
 export async function setMessageRead(
 	messageId: string,

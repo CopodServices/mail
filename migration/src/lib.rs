@@ -13,6 +13,7 @@ mod m20261010_000010_drop_domain_dkim;
 mod m20261010_000011_mailbox_display_name;
 mod m20261011_000012_outbound_copy_and_keyset;
 mod m20261011_000013_mailbox_auto_forward;
+mod m20261011_000014_antispam;
 mod m20261011_000014_message_search_trgm;
 mod m20261011_000015_imap_pop3;
 
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261010_000011_mailbox_display_name::Migration),
             Box::new(m20261011_000012_outbound_copy_and_keyset::Migration),
             Box::new(m20261011_000013_mailbox_auto_forward::Migration),
+            Box::new(m20261011_000014_antispam::Migration),
             Box::new(m20261011_000014_message_search_trgm::Migration),
             Box::new(m20261011_000015_imap_pop3::Migration),
         ]

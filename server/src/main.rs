@@ -5,13 +5,13 @@ mod imap;
 mod pop3;
 mod session;
 mod smtp;
+mod spam_store;
 mod state;
 
 #[cfg(test)]
 mod integration_tests;
 
 use anyhow::Context;
-use mail_auth::MessageAuthenticator;
 use mailcore::config::Config;
 use mailcore::queue::Queue;
 use mailcore::relay::Relay;
@@ -50,16 +50,32 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
-    let authenticator = if config.verify_auth {
-        match MessageAuthenticator::new_system_conf() {
-            Ok(authenticator) => Some(Arc::new(authenticator)),
-            Err(err) => {
-                warn!(error = %err, "DNS resolver unavailable; inbound verification disabled");
+    let spam_config = Arc::new(mailcore::spam::SpamConfig::load());
+
+    // The authentication resolver and the DNSBL lookups share one resolver;
+    // SPAM_DNS_RESOLVER points both at a resolver that permits blocklists.
+    let authenticator = if config.verify_auth || !spam_config.mode.is_off() {
+        match mailcore::spam::build_authenticator(spam_config.dns_resolver.as_deref()) {
+            Some(authenticator) => Some(Arc::new(authenticator)),
+            None => {
+                warn!("DNS resolver unavailable; inbound verification disabled");
                 None
             }
         }
     } else {
         None
+    };
+
+    let spam = if spam_config.mode.is_off() {
+        None
+    } else {
+        let resolver = authenticator
+            .as_ref()
+            .map(|authenticator| Arc::new(authenticator.resolver().clone()));
+        info!(mode = ?spam_config.mode, "spam filtering enabled");
+        Some(Arc::new(
+            mailcore::spam::SpamEngine::new(spam_config.clone(), resolver).await,
+        ))
     };
 
     let (events, _) = tokio::sync::broadcast::channel(256);
@@ -68,11 +84,17 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         store: store.clone(),
         authenticator,
+        spam,
         tls,
         events,
     };
 
     bootstrap::seed(&state).await?;
+
+    if state.spam.is_some() {
+        spam_store::load(&state).await;
+        spam_store::spawn(state.clone());
+    }
 
     let queue = Arc::new(Queue {
         db: state.db.clone(),

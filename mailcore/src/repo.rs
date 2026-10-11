@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use entity::{domain, mailbox, message, outbound_job};
+use entity::{contact, domain, mailbox, message, outbound_job, setting};
 use sea_orm::sea_query::{Alias, Expr};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, ExprTrait,
@@ -243,6 +243,43 @@ pub async fn delete_mailbox(db: &DatabaseConnection, address: &str) -> Result<bo
         .exec(db)
         .await?;
     Ok(result.rows_affected > 0)
+}
+
+/// The per-mailbox spam policy: a junk-threshold override and the sender
+/// allow/block lists.
+#[derive(Debug, Clone, Default)]
+pub struct SpamPolicy {
+    pub threshold: Option<f64>,
+    pub allowed: bool,
+    pub blocked: bool,
+}
+
+/// Reads the junk threshold override and the allow/block lists for one mailbox
+/// and sender. A missing row means "use the defaults".
+pub async fn spam_policy(
+    db: &DatabaseConnection,
+    mailbox_id: Uuid,
+    address: &str,
+    sender: &str,
+) -> Result<SpamPolicy> {
+    let threshold = setting::Entity::find()
+        .filter(setting::Column::Scope.eq(address.trim().to_ascii_lowercase()))
+        .one(db)
+        .await?
+        .and_then(|row| row.spam_threshold);
+
+    let sender = sender.trim().to_ascii_lowercase();
+    let contact = contact::Entity::find()
+        .filter(contact::Column::MailboxId.eq(mailbox_id))
+        .filter(contact::Column::Address.eq(sender))
+        .one(db)
+        .await?;
+
+    Ok(SpamPolicy {
+        threshold,
+        allowed: contact.as_ref().is_some_and(|contact| contact.allowed),
+        blocked: contact.as_ref().is_some_and(|contact| contact.blocked),
+    })
 }
 
 pub async fn insert_message(

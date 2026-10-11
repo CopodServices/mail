@@ -248,4 +248,24 @@ describe.skipIf(!base)("the web client against the live API", () => {
 		);
 		expect(refused.status).toBe(400);
 	});
+
+	test("reads and writes the spam settings", async () => {
+		const before = await api.fetchSpamSettings();
+		expect(before.defaultThreshold).toBeGreaterThan(0);
+		expect(Array.isArray(before.allow)).toBe(true);
+
+		// Saving the same threshold keeps it; a null follows the default again.
+		const saved = await api.updateSpamThreshold(before.threshold);
+		expect(saved.threshold).toBe(before.threshold);
+
+		const entry = "spam-contract@remote.test";
+		await api.updateSpamList(entry, "block");
+		expect((await api.fetchSpamSettings()).block).toContain(entry);
+		await api.updateSpamList(entry, "allow");
+		const allowed = await api.fetchSpamSettings();
+		expect(allowed.allow).toContain(entry);
+		expect(allowed.block).not.toContain(entry);
+		await api.updateSpamList(entry, "none");
+		expect((await api.fetchSpamSettings()).allow).not.toContain(entry);
+	});
 });

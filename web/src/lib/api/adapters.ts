@@ -33,6 +33,9 @@ type ApiMessage = {
 	scheduled_at?: string | null;
 	send_state?: string | null;
 	send_error?: string | null;
+	spam_score?: number | null;
+	spam_tags?: string | null;
+	spam_action?: string | null;
 };
 
 type ApiMessageList = {
@@ -66,6 +69,16 @@ type ApiMessageDetail = {
 	};
 };
 
+/** The verdict the spam panel shows, from the API's spam_action. */
+function spamVerdictOf(
+	action: string | null | undefined,
+): Message["spamVerdict"] {
+	if (!action) return null;
+	if (action === "accept") return "inbox";
+	if (action === "log") return "suspicious";
+	return "spam";
+}
+
 function toMessage(dto: ApiMessage): Message {
 	const folder = dto.folder as MessageFolder;
 	return {
@@ -88,6 +101,9 @@ function toMessage(dto: ApiMessage): Message {
 		scheduledAt: dto.scheduled_at ?? null,
 		sendState: (dto.send_state as Message["sendState"]) ?? null,
 		sendError: dto.send_error ?? null,
+		spamScore: dto.spam_score ?? null,
+		spamVerdict: spamVerdictOf(dto.spam_action),
+		spamSignals: dto.spam_tags ?? null,
 		threadId: dto.message_id,
 		createdAt: dto.received_at,
 		threadCount: 1,

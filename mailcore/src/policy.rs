@@ -2,7 +2,9 @@ use crate::address;
 use mail_auth::dmarc::Policy;
 use mail_auth::dmarc::verify::DmarcParameters;
 use mail_auth::spf::verify::SpfParameters;
-use mail_auth::{AuthenticatedMessage, DkimResult, DmarcResult, MessageAuthenticator};
+use mail_auth::{
+    AuthenticatedMessage, DkimResult, DmarcResult, IprevResult, MessageAuthenticator, Parameters,
+};
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +20,11 @@ pub struct AuthOutcome {
     pub dkim: Option<String>,
     pub dmarc: Option<String>,
     pub dmarc_policy: Option<String>,
+    /// The forward-confirmed reverse DNS result (PTR sanity).
+    pub iprev: Option<String>,
+    /// The ARC chain result: "pass" when the chain is intact or absent, "fail"
+    /// when the last seal fails chain validation.
+    pub arc: Option<String>,
     pub action: AuthAction,
 }
 
@@ -29,6 +36,8 @@ impl AuthOutcome {
             dkim: None,
             dmarc: None,
             dmarc_policy: None,
+            iprev: None,
+            arc: None,
             action: AuthAction::Accept,
         }
     }
@@ -89,6 +98,17 @@ pub async fn evaluate(
         ))
         .await;
 
+    let iprev = authenticator.verify_iprev(Parameters::new(peer_ip)).await;
+    let iprev_label = match iprev.result() {
+        IprevResult::Pass => "pass",
+        IprevResult::Fail(_) | IprevResult::PermError(_) => "fail",
+        _ => "none",
+    }
+    .to_string();
+
+    let arc = authenticator.verify_arc(Parameters::new(&message)).await;
+    let arc_label = if arc.can_be_sealed() { "pass" } else { "fail" }.to_string();
+
     let policy = dmarc.policy();
     let result = dmarc.result();
     let dmarc_label = format!("{result:?}").to_ascii_lowercase();
@@ -100,6 +120,8 @@ pub async fn evaluate(
         dkim: Some(dkim_label),
         dmarc: Some(dmarc_label),
         dmarc_policy: Some(policy_label),
+        iprev: Some(iprev_label),
+        arc: Some(arc_label),
         action,
     }
 }

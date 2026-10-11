@@ -20,12 +20,16 @@ base64 = "0.22"
 chrono = { version = "0.4.42", features = ["serde"] }
 dotenvy = "0.15"
 hmac = "0.13"
+ipnet = "2"
 jsonwebtoken = "9"
-mail-auth = { version = "0.13", default-features = false, features = ["ring"] }
+mail-auth = { version = "0.13", default-features = false, features = ["ring", "arc"] }
 mail-builder = "1.0"
 mail-parser = "0.11"
 object_store = { version = "0.14", features = ["aws"] }
 rand = "0.8"
+redis = { version = "1.7", features = ["tokio-comp", "connection-manager"] }
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 rustls-pki-types = "1"
@@ -38,6 +42,7 @@ sea-orm = { version = "2.0.0-rc", features = [
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
+sha1_smol = "1"
 sha2 = "0.11"
 smtp-proto = "0.2"
 tokio = { version = "1.48", features = [
@@ -65,3 +70,4 @@ utoipa-scalar = { version = "0.3.0", features = ["axum"] }
 uuid = { version = "1.18.1", features = ["v7", "serde"] }
 validator = { version = "0.21.0", features = ["derive"] }
 webpki-roots = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

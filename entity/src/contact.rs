@@ -14,6 +14,8 @@ pub struct Model {
     pub preview_key: Option<String>,
     pub avatar_content_type: Option<String>,
     pub blocked: bool,
+    /// Never file this sender as junk, whatever the score says.
+    pub allowed: bool,
     /// manual, inbound or outbound.
     pub source: String,
     pub last_seen_at: chrono::DateTime<Utc>,

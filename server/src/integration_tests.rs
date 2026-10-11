@@ -92,6 +92,7 @@ async fn stores_inbound_mail_to_s3_and_postgres() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -162,6 +163,110 @@ async fn stores_inbound_mail_to_s3_and_postgres() {
         .await;
 }
 
+/// Antispam: a shortener URL pushes an inbound message past the junk threshold,
+/// so the engine files it in the spam folder and records the verdict on the row.
+#[tokio::test]
+async fn files_over_threshold_inbound_as_spam() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    let config = Arc::new(test_config());
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let store = MailStore::new(&config.s3).expect("object store");
+
+    let domain = format!("spam-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let address = format!("inbox@{domain}");
+    let mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
+
+    let spam_config = Arc::new(mailcore::spam::SpamConfig::for_mode(
+        mailcore::spam::SpamMode::Quarantine,
+        1.0,
+        vec![("URL_SHORTENER", mailcore::spam::ScoreRule::Score(5.0))],
+    ));
+    let engine = Arc::new(mailcore::spam::SpamEngine::new(spam_config, None).await);
+
+    let state = AppState {
+        db: db.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        authenticator: None,
+        spam: Some(engine),
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(smtp::serve(listener, state.clone(), Mode::Inbound));
+
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+
+    assert_eq!(read_reply(&mut reader).await, 220);
+    command(&mut write_half, "EHLO client.example.test").await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, "MAIL FROM:<sender@remote.test>").await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, &format!("RCPT TO:<{address}>")).await;
+    assert_eq!(read_reply(&mut reader).await, 250);
+
+    command(&mut write_half, "DATA").await;
+    assert_eq!(read_reply(&mut reader).await, 354);
+    write_half
+        .write_all(&wire(&[
+            "From: Alice <alice@remote.test>",
+            "To: inbox",
+            "Subject: Cheap pills",
+            "",
+            "see http://bit.ly/xyz",
+            ".",
+        ]))
+        .await
+        .unwrap();
+    write_half.flush().await.unwrap();
+    assert_eq!(read_reply(&mut reader).await, 250);
+
+    command(&mut write_half, "QUIT").await;
+    assert_eq!(read_reply(&mut reader).await, 221);
+
+    let stored = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox.id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1, "one message should be indexed");
+    let stored = &stored[0];
+    assert_eq!(stored.status, message::Status::Quarantined);
+    assert!(stored.spam_score.unwrap_or(0.0) >= 5.0);
+    assert!(
+        stored
+            .spam_tags
+            .as_deref()
+            .unwrap_or_default()
+            .contains("URL_SHORTENER")
+    );
+
+    // The stored copy carries the X-Spam headers; the forwarded bytes would not.
+    let raw = store.get(&stored.storage_key).await.expect("read object");
+    assert!(String::from_utf8_lossy(&raw).contains("X-Spam-Score:"));
+
+    // Clean up the fixtures.
+    let _ = store.delete(&stored.storage_key).await;
+    let _ = repo::delete_message(&db, stored.id).await;
+    let _ = repo::delete_mailbox(&db, &address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
 /// Submission path: AUTH is required, the sender must match the authenticated
 /// mailbox, and the queued message is relayed to the smarthost (Mailpit).
 #[tokio::test]
@@ -195,6 +300,7 @@ async fn relays_submission_through_the_smarthost() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -427,6 +533,7 @@ async fn a_blind_recipient_is_named_by_their_own_copy() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -543,6 +650,7 @@ async fn sends_a_reply_with_its_conversation_headers() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -715,6 +823,7 @@ async fn enforces_the_mailbox_storage_quota() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -857,6 +966,7 @@ async fn sessions_scope_a_mailbox_and_the_operator_key_manages_tenants() {
         config: config.clone(),
         store,
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -1491,6 +1601,7 @@ async fn auto_forwards_an_arriving_message_once() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -1711,6 +1822,7 @@ async fn preview_serves_only_renderable_attachments_inline() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -1992,6 +2104,7 @@ async fn deleting_a_mailbox_takes_its_messages_and_objects() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -2065,6 +2178,7 @@ async fn a_message_without_its_object_reads_as_gone() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -2138,6 +2252,7 @@ async fn imap_reads_the_inbox_and_applies_flags() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -2304,6 +2419,7 @@ async fn pop3_downloads_and_deletes_the_drop() {
         config: config.clone(),
         store: store.clone(),
         authenticator: None,
+        spam: None,
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };

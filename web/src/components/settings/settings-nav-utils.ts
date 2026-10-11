@@ -16,6 +16,10 @@ export const settingsNavSections: SettingsNavSection[] = [
 				href: "/settings/clients",
 				labelKey: "settings.nav.clients",
 			},
+			{
+				href: "/settings/spam",
+				labelKey: "settings.nav.spam",
+			},
 		],
 	},
 ];

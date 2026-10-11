@@ -11,6 +11,7 @@ pub mod query;
 pub mod queue;
 pub mod relay;
 pub mod repo;
+pub mod spam;
 pub mod srs;
 pub mod store;
 pub mod stream;

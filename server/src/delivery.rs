@@ -22,6 +22,38 @@ pub async fn store_local(
     raw: &[u8],
     outcome: &AuthOutcome,
 ) -> Result<Uuid> {
+    store_local_with_spam(
+        state,
+        mailbox,
+        direction,
+        envelope_from,
+        envelope_to,
+        raw,
+        outcome,
+        None,
+        false,
+    )
+    .await
+}
+
+/// Stores a message and records the spam verdict that scored it.
+///
+/// When a verdict is present its headers are prepended to the stored copy (the
+/// bytes handed to the relay for a forward stay pristine, so DKIM survives) and
+/// its score, tags and action are written on the row. A quarantine is forced
+/// into the spam folder.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_local_with_spam(
+    state: &AppState,
+    mailbox: &mailbox::Model,
+    direction: message::Direction,
+    envelope_from: &str,
+    envelope_to: &str,
+    raw: &[u8],
+    outcome: &AuthOutcome,
+    verdict: Option<&mailcore::spam::Verdict>,
+    quarantine: bool,
+) -> Result<Uuid> {
     // Refuse a message that would push the mailbox past its storage quota; a
     // zero quota means unlimited. Checked before the object-store write so an
     // over-quota message leaves nothing behind.
@@ -43,9 +75,15 @@ pub async fn store_local(
         .unwrap_or_else(|| mailbox.address.clone());
     let key = store::inbound_key(&domain, &mailbox.local_part, &id, now);
 
+    // The stored copy carries the X-Spam headers; the bytes forwarded below
+    // stay pristine so the sender's DKIM still verifies.
+    let stored = match verdict {
+        Some(verdict) => verdict.prepend(raw),
+        None => raw.to_vec(),
+    };
     state
         .store
-        .put(&key, raw.to_vec())
+        .put(&key, stored.clone())
         .await
         .context("failed to write the message to object storage")?;
 
@@ -55,9 +93,11 @@ pub async fn store_local(
         .header_from
         .clone()
         .unwrap_or_else(|| envelope_from.to_string());
-    let status = match outcome.action {
-        mailcore::policy::AuthAction::Quarantine => message::Status::Quarantined,
-        _ => message::Status::Stored,
+    let status = if quarantine || matches!(outcome.action, mailcore::policy::AuthAction::Quarantine)
+    {
+        message::Status::Quarantined
+    } else {
+        message::Status::Stored
     };
     // A copy filed in the sender's own Sent folder is not an arrival, so only an
     // inbound message tells connected clients that new mail landed.
@@ -79,12 +119,15 @@ pub async fn store_local(
             header_from: Set(metadata.header_from),
             in_reply_to: Set(metadata.in_reply_to),
             references_header: Set(metadata.references),
-            size_bytes: Set(raw.len() as i64),
+            size_bytes: Set(stored.len() as i64),
             storage_key: Set(key),
             spf_result: Set(outcome.spf.clone()),
             dkim_result: Set(outcome.dkim.clone()),
             dmarc_result: Set(outcome.dmarc.clone()),
             dmarc_policy: Set(outcome.dmarc_policy.clone()),
+            spam_score: Set(verdict.map(|verdict| verdict.score as f64)),
+            spam_tags: Set(verdict.map(|verdict| verdict.tags_summary())),
+            spam_action: Set(verdict.map(|verdict| verdict.action.as_str().to_string())),
             received_at: Set(now),
         },
     )
