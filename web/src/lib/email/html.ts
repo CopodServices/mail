@@ -3,6 +3,7 @@ import createDOMPurify from "dompurify";
 import parseSrcset from "parse-srcset";
 import { type DefaultTreeAdapterTypes, parse, serialize } from "parse5";
 import type { SanitizeEmailHtmlOptions } from "@/components/messages/message-detail/email-html-sanitizer-types";
+import { resolveInlineAttachment } from "@/lib/email/inline-attachments";
 
 type Options = SanitizeEmailHtmlOptions & {
 	allowRemote?: boolean;
@@ -323,15 +324,7 @@ export function resolveEmailCidUrls(
 ): string {
 	if (typeof document === "undefined" || !urls.size) return source;
 	const doc = mailDocument(source);
-	const resolve = (value: string) => {
-		if (!/^cid:/i.test(value)) return value;
-		const id = value.slice(4).replace(/^<|>$/g, "");
-		try {
-			return urls.get(id) ?? urls.get(decodeURIComponent(id)) ?? value;
-		} catch {
-			return urls.get(id) ?? value;
-		}
-	};
+	const resolve = (value: string) => resolveInlineAttachment(value, urls);
 	for (const element of doc.template.content.querySelectorAll("*")) {
 		for (const attr of RESOURCE_ATTRIBUTES) {
 			if (element.hasAttribute(attr))

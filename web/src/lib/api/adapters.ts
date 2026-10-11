@@ -52,6 +52,7 @@ type ApiAttachment = {
 	index: number;
 	filename: string | null;
 	content_type: string | null;
+	content_id?: string | null;
 	size_bytes: number;
 };
 
@@ -143,19 +144,33 @@ export function adaptCounts(payload: ApiCounts): MessageCounts {
 	};
 }
 
+/**
+ * One MIME part as the client model. A part a body embeds by cid: carries a
+ * Content-ID, which the reader uses to rewrite that reference to this part.
+ */
+export function toMessageAttachment(
+	attachment: ApiAttachment,
+	messageId: string,
+) {
+	const contentId = attachment.content_id?.trim() || null;
+	return {
+		contentId,
+		disposition: contentId ? ("inline" as const) : ("attachment" as const),
+		filename: attachment.filename ?? "attachment",
+		// A stored message's parts are addressed by position in the message.
+		id: String(attachment.index),
+		messageId,
+		size: attachment.size_bytes,
+		type: attachment.content_type ?? "application/octet-stream",
+	};
+}
+
 export function adaptMessageDetail(payload: ApiMessageDetail) {
 	const message = payload.data?.message;
 	if (!message) return { message: undefined };
-	const attachments = (payload.data?.attachments ?? []).map((attachment) => ({
-		contentId: null,
-		disposition: "attachment" as const,
-		filename: attachment.filename ?? "attachment",
-		// The attachment endpoint addresses parts by position.
-		id: String(attachment.index),
-		messageId: message.id,
-		size: attachment.size_bytes,
-		type: attachment.content_type ?? "application/octet-stream",
-	}));
+	const attachments = (payload.data?.attachments ?? []).map((attachment) =>
+		toMessageAttachment(attachment, message.id),
+	);
 	return {
 		message: toMessage(message),
 		body: {

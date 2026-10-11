@@ -1,5 +1,6 @@
 import { splitQuotedHtml } from "@/components/compose/rich-text-utils";
 import type { Message } from "@/hooks/types";
+import { toMessageAttachment } from "@/lib/api/adapters";
 import { apiFetch } from "@/lib/api/client";
 import { getDisplayNameForAddress } from "@/lib/contacts/utils";
 import {
@@ -8,6 +9,7 @@ import {
 	normalizeEmailAddress,
 } from "@/lib/email/address";
 import { resolveEmailCidUrls } from "@/lib/email/html";
+import { inlineAttachmentUrls } from "@/lib/email/inline-attachments";
 import { formatRecipientAddressList } from "@/lib/email/recipient-display";
 import {
 	htmlToReadableText,
@@ -45,21 +47,16 @@ export async function fetchMessageMetadata(
 				index: number;
 				filename: string | null;
 				content_type: string | null;
+				content_id?: string | null;
 				size_bytes: number;
 			}>;
 			unsubscribe_url?: string | null;
 		};
 	};
 	return {
-		attachments: (payload.data?.attachments ?? []).map((attachment) => ({
-			contentId: null,
-			disposition: "attachment" as const,
-			filename: attachment.filename ?? "attachment",
-			id: String(attachment.index),
-			messageId,
-			size: attachment.size_bytes,
-			type: attachment.content_type ?? "application/octet-stream",
-		})),
+		attachments: (payload.data?.attachments ?? []).map((attachment) =>
+			toMessageAttachment(attachment, messageId),
+		),
 		unsubscribeUrl: payload.data?.unsubscribe_url ?? null,
 	};
 }
@@ -144,26 +141,16 @@ export function getMessageBodyDisplay(
 	};
 }
 
-function getAttachmentUrl(messageId: string, attachmentId: string): string {
-	return `/api/messages/${messageId}/attachments/${attachmentId}?preview=1`;
-}
-
 export function resolveInlineAttachmentUrls(
 	htmlBody: string | null,
 	messageId: string,
 	attachments: MessageAttachment[],
 ): string | null {
 	if (!htmlBody) return null;
-
-	const urls = new Map<string, string>();
-	for (const attachment of attachments) {
-		if (attachment.contentId)
-			urls.set(
-				attachment.contentId.replace(/^<|>$/g, ""),
-				getAttachmentUrl(messageId, attachment.id),
-			);
-	}
-	return resolveEmailCidUrls(htmlBody, urls);
+	return resolveEmailCidUrls(
+		htmlBody,
+		inlineAttachmentUrls(messageId, attachments),
+	);
 }
 
 export function formatAttachmentSize(size: number): string {
