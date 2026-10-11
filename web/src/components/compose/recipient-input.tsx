@@ -27,6 +27,7 @@ export function RecipientInput({
 	placeholder,
 	disabled,
 	required,
+	defaultDomain,
 	autoFocus,
 	trailing,
 }: RecipientInputProps) {
@@ -35,7 +36,7 @@ export function RecipientInput({
 	const inputRef = useRef<HTMLInputElement | null>(null);
 
 	function commit(raw = draft) {
-		const entries = parseRecipientEntries(raw, value);
+		const entries = parseRecipientEntries(raw, value, defaultDomain);
 		if (entries.length > 0) onChange([...value, ...entries]);
 		setDraft("");
 	}
@@ -64,7 +65,10 @@ export function RecipientInput({
 			className="flex min-h-9 items-center gap-2 border-b border-neutral-100 px-4 py-1"
 			onClick={() => inputRef.current?.focus()}
 		>
-			<Label htmlFor={id} className="w-8 shrink-0 text-sm text-neutral-500">
+			<Label
+				htmlFor={id}
+				className="min-w-12 shrink-0 whitespace-nowrap text-sm text-neutral-500"
+			>
 				{label}
 			</Label>
 			<div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
@@ -81,7 +85,9 @@ export function RecipientInput({
 									: "border-red-200 bg-red-50 text-red-700",
 							)}
 						>
-							<span className="truncate">{getRecipientLabel(entry)}</span>
+							<span className="truncate">
+								{getRecipientLabel(entry, defaultDomain)}
+							</span>
 							{!disabled && (
 								<button
 									type="button"

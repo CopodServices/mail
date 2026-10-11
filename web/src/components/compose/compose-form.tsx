@@ -36,6 +36,7 @@ import { cn } from "@/lib/utils";
 import type { ComposeAttachmentPolicy } from "./attachment-policy-types";
 import { RecipientInput } from "./recipient-input";
 import {
+	completeRecipientEntry,
 	headerToRecipients,
 	isValidRecipient,
 	recipientsToHeader,
@@ -156,6 +157,15 @@ export function ComposeForm({
 		selectedMailbox && selectedFrom
 			? formatEmailAddress(selectedFrom, selectedMailbox.displayName)
 			: "";
+	// A recipient typed as a bare mailbox name belongs to the domain the sender
+	// writes from, so `maya` means maya@example.test rather than nothing.
+	const recipientDomain = useMemo(
+		() =>
+			getEmailAddress(selectedFrom).split("@")[1] ??
+			selectedMailbox?.hostname ??
+			"",
+		[selectedFrom, selectedMailbox?.hostname],
+	);
 
 	useEffect(() => {
 		if (!senderAddresses.length) {
@@ -183,9 +193,12 @@ export function ComposeForm({
 
 				setDraftId(draft.id);
 				setScheduledAt(null);
-				setTo(headerToRecipients(draft.toAddr));
-				const draftCc = headerToRecipients(draft.ccAddr);
-				const draftBcc = headerToRecipients(draft.bccAddr);
+				// A stored draft can hold a bare mailbox name; resolve it against the
+				// domain the draft is written from so it loads ready to send.
+				const draftDomain = getEmailAddress(draft.fromAddr).split("@")[1] ?? "";
+				setTo(headerToRecipients(draft.toAddr, draftDomain));
+				const draftCc = headerToRecipients(draft.ccAddr, draftDomain);
+				const draftBcc = headerToRecipients(draft.bccAddr, draftDomain);
 				setCc(draftCc);
 				setBcc(draftBcc);
 				setShowCc(draftCc.length > 0);
@@ -326,7 +339,18 @@ export function ComposeForm({
 			setToast({ type: "error", message: t("compose.error.noRecipient") });
 			return;
 		}
-		const invalid = [...to, ...cc, ...bcc].find(
+		// Complete a bare mailbox name one last time, in case it was committed
+		// before the sender (and so the domain) was known.
+		const resolvedTo = to.map((entry) =>
+			completeRecipientEntry(entry, recipientDomain),
+		);
+		const resolvedCc = cc.map((entry) =>
+			completeRecipientEntry(entry, recipientDomain),
+		);
+		const resolvedBcc = bcc.map((entry) =>
+			completeRecipientEntry(entry, recipientDomain),
+		);
+		const invalid = [...resolvedTo, ...resolvedCc, ...resolvedBcc].find(
 			(entry) => !isValidRecipient(entry),
 		);
 		if (invalid) {
@@ -346,9 +370,9 @@ export function ComposeForm({
 		const sendDraft: DraftInput = {
 			mailbox_id: selectedMailbox?.id ?? null,
 			from: fromAddr,
-			to: recipientsToHeader(to),
-			cc: recipientsToHeader(cc),
-			bcc: recipientsToHeader(bcc),
+			to: recipientsToHeader(resolvedTo),
+			cc: recipientsToHeader(resolvedCc),
+			bcc: recipientsToHeader(resolvedBcc),
 			subject,
 			text: htmlToPlainText(fullHtml),
 			html: fullHtml,
@@ -372,9 +396,9 @@ export function ComposeForm({
 			}
 			const outcome = await sendMessage({
 				from: fromAddr,
-				to,
-				cc,
-				bcc,
+				to: resolvedTo,
+				cc: resolvedCc,
+				bcc: resolvedBcc,
 				subject,
 				text: htmlToPlainText(fullHtml),
 				html: fullHtml,
@@ -740,7 +764,7 @@ export function ComposeForm({
 					<div className="border-b border-neutral-100 px-4 py-1 flex flex-row items-center">
 						<Label
 							htmlFor={`${mode}-from`}
-							className="text-sm text-neutral-500"
+							className="min-w-12 shrink-0 whitespace-nowrap text-sm text-neutral-500"
 						>
 							{t("compose.from")}
 						</Label>
@@ -777,6 +801,7 @@ export function ComposeForm({
 						value={to}
 						onChange={setTo}
 						placeholder={t("compose.toPlaceholder")}
+						defaultDomain={recipientDomain}
 						required
 						disabled={loadingDraft}
 						trailing={
@@ -809,6 +834,7 @@ export function ComposeForm({
 							value={cc}
 							onChange={setCc}
 							placeholder={t("compose.ccPlaceholder")}
+							defaultDomain={recipientDomain}
 							disabled={loadingDraft}
 							autoFocus={!loadingDraft && cc.length === 0}
 						/>
@@ -820,6 +846,7 @@ export function ComposeForm({
 							value={bcc}
 							onChange={setBcc}
 							placeholder={t("compose.bccPlaceholder")}
+							defaultDomain={recipientDomain}
 							disabled={loadingDraft}
 							autoFocus={!loadingDraft && bcc.length === 0}
 						/>
