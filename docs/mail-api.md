@@ -123,7 +123,7 @@ delivered to that mailbox is queued to the address. The message goes out exactly
 as it arrived, so its own DKIM signature still authenticates it at the
 destination, and only the envelope sender is rewritten: the original sender is
 encoded with Sender Rewriting Scheme on the mailbox's own domain
-(SRS0=<hash>=<days>=<sender-domain>=<sender-local>, hashed with a key derived
+(SRS0=<hash>=<stamp>=<sender-domain>=<sender-local>, hashed with a key derived
 from the session secret and valid for three weeks), which is what the relay asks
 of forwarded mail. The copy carries an X-Copod-Auto-Forwarded header, so a copy
 that loops back is delivered but never forwarded again, and forwarding to the
