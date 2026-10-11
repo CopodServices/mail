@@ -83,6 +83,10 @@ pub struct Config {
     pub server_port: u16,
     pub smtp_listen: String,
     pub submission_listen: String,
+    /// IMAP listener; None keeps the service without one.
+    pub imap_listen: Option<String>,
+    /// POP3 listener; None keeps the service without one.
+    pub pop3_listen: Option<String>,
     pub hostname: String,
     pub bootstrap_domains: Vec<String>,
     pub bootstrap_password: Option<String>,
@@ -125,6 +129,8 @@ impl Config {
             smtp_listen: optional("SMTP_LISTEN").unwrap_or_else(|| "0.0.0.0:2525".to_string()),
             submission_listen: optional("SUBMISSION_LISTEN")
                 .unwrap_or_else(|| "0.0.0.0:2587".to_string()),
+            imap_listen: optional("IMAP_LISTEN"),
+            pop3_listen: optional("POP3_LISTEN"),
             hostname: optional("MAIL_HOSTNAME").unwrap_or_else(|| "localhost".to_string()),
             bootstrap_domains: csv("MAIL_DOMAINS"),
             bootstrap_password: optional("MAIL_BOOTSTRAP_PASSWORD"),
@@ -157,4 +163,24 @@ impl Config {
     pub fn starttls_enabled(&self) -> bool {
         self.tls.is_some()
     }
+
+    /// True when the IMAP listener is configured to run.
+    pub fn imap_enabled(&self) -> bool {
+        self.imap_listen.is_some()
+    }
+
+    /// True when the POP3 listener is configured to run.
+    pub fn pop3_enabled(&self) -> bool {
+        self.pop3_listen.is_some()
+    }
+}
+
+/// The port out of a listen address like `0.0.0.0:993`, or the fallback when
+/// the address does not carry a parseable one.
+pub fn listen_port(listen: &str, fallback: u16) -> u16 {
+    listen
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(fallback)
 }

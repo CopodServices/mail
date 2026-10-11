@@ -25,6 +25,9 @@ pub enum Status {
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
+    /// Stable per-message number the IMAP and POP3 readers address mail by.
+    /// Assigned from a sequence, so it only ever grows.
+    pub uid: i64,
     pub mailbox_id: Option<Uuid>,
     pub direction: Direction,
     pub status: Status,

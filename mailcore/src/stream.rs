@@ -128,6 +128,24 @@ impl<S: AsyncRead + Unpin> Conn<S> {
 
     /// Reads a DATA block up to the CRLF.CRLF terminator, undoing dot-stuffing.
     pub async fn read_data(&mut self, max: usize) -> io::Result<Vec<u8>> {
+        self.read_data_block(max).await
+    }
+
+    /// Reads exactly `count` bytes, for the literal a protocol announces with
+    /// a marker rather than a terminator.
+    pub async fn read_exact_n(&mut self, count: usize) -> io::Result<Vec<u8>> {
+        while self.buf.len() < count {
+            if self.fill().await? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "connection closed inside a literal",
+                ));
+            }
+        }
+        Ok(self.buf.drain(..count).collect())
+    }
+
+    async fn read_data_block(&mut self, max: usize) -> io::Result<Vec<u8>> {
         loop {
             if let Some(body) = split_data_block(&mut self.buf) {
                 return Ok(dot_unstuff(&body));

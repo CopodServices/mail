@@ -11,6 +11,8 @@ pub struct Model {
     pub domain_id: Uuid,
     pub local_part: String,
     pub password_hash: String,
+    /// IMAP UIDVALIDITY for this mailbox's UID space.
+    pub uid_validity: i32,
     /// Appended to new messages composed from this mailbox.
     pub signature: Option<String>,
     /// The name recipients see beside the address in the From header.
