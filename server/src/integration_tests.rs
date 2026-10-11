@@ -180,7 +180,13 @@ async fn relays_submission_through_the_smarthost() {
     let domain = format!("submit-{}.example", Uuid::now_v7().simple());
     repo::ensure_domain(&db, &domain).await.unwrap();
     let address = format!("sender@{domain}");
-    repo::create_mailbox(&db, &address, "secret").await.unwrap();
+    let sender_mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
+    // A second mailbox on the same domain: it gets a local copy of its own, while
+    // the sender's copy is the one filed in Sent.
+    let local_address = format!("local@{domain}");
+    let local_mailbox = repo::create_mailbox(&db, &local_address, "secret")
+        .await
+        .unwrap();
 
     let state = AppState {
         db: db.clone(),
@@ -224,6 +230,8 @@ async fn relays_submission_through_the_smarthost() {
     assert_eq!(read_reply(&mut reader).await, 250);
     command(&mut write_half, "RCPT TO:<friend@remote.test>").await;
     assert_eq!(read_reply(&mut reader).await, 250);
+    command(&mut write_half, &format!("RCPT TO:<{local_address}>")).await;
+    assert_eq!(read_reply(&mut reader).await, 250);
 
     command(&mut write_half, "DATA").await;
     assert_eq!(read_reply(&mut reader).await, 354);
@@ -232,6 +240,7 @@ async fn relays_submission_through_the_smarthost() {
             "From: Sender <sender@remote.test>",
             "To: friend@remote.test",
             "Subject: Relayed",
+            "Bcc: blind@remote.test",
             "",
             "relay me",
             ".",
@@ -253,6 +262,53 @@ async fn relays_submission_through_the_smarthost() {
         job.recipients,
         serde_json::json!(["friend@remote.test"]),
         "recipients should be captured from RCPT TO"
+    );
+
+    // A Bcc names a recipient only the sender may see, so the copy handed to the
+    // relay and the copy a local recipient gets are both stripped of the header.
+    // The sender's own Sent copy is the one that keeps it.
+    let queued = store
+        .get(&job.storage_key)
+        .await
+        .expect("read the queued copy");
+    assert!(
+        !String::from_utf8_lossy(&queued)
+            .to_lowercase()
+            .contains("bcc"),
+        "a relayed copy must not name blind recipients"
+    );
+    let sent = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(sender_mailbox.id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(sent.len(), 1, "the sender's own copy is filed once");
+    let sent_raw = store
+        .get(&sent[0].storage_key)
+        .await
+        .expect("read the sent copy");
+    assert_eq!(
+        String::from_utf8_lossy(&sent_raw)
+            .matches("Bcc: blind@remote.test")
+            .count(),
+        1,
+        "the Sent copy keeps the header"
+    );
+    let inbox = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(local_mailbox.id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(inbox.len(), 1, "the local recipient has one copy");
+    let inbox_raw = store
+        .get(&inbox[0].storage_key)
+        .await
+        .expect("read the inbox copy");
+    assert!(
+        !String::from_utf8_lossy(&inbox_raw)
+            .to_lowercase()
+            .contains("bcc"),
+        "a local recipient's copy must not name blind recipients"
     );
 
     // Process the queue once; Mailpit accepts, so the job must become sent.
@@ -279,8 +335,11 @@ async fn relays_submission_through_the_smarthost() {
 
     // Clean up the fixtures.
     let _ = store.delete(&job.storage_key).await;
+    let _ = store.delete(&sent[0].storage_key).await;
+    let _ = store.delete(&inbox[0].storage_key).await;
     let _ = outbound_job::Entity::delete_by_id(job.id).exec(&db).await;
     let _ = repo::delete_mailbox(&db, &address).await;
+    let _ = repo::delete_mailbox(&db, &local_address).await;
     let _ = entity::domain::Entity::delete_many()
         .filter(entity::domain::Column::Name.eq(domain))
         .exec(&db)
@@ -965,6 +1024,7 @@ async fn auto_forwards_an_arriving_message_once() {
         &[
             "From: sender@remote.test",
             "Subject: hello",
+            "Bcc: blind@remote.test",
             "",
             "body line",
         ],
@@ -1005,8 +1065,9 @@ async fn auto_forwards_an_arriving_message_once() {
         Some("sender@remote.test")
     );
 
-    // The message itself goes out untouched, so its own DKIM signature survives;
-    // the marker is what stops a copy that loops back from being sent on again.
+    // The message itself goes out with its own headers, so its own DKIM signature
+    // survives; the marker is what stops a copy that loops back from being sent on
+    // again, and a Bcc header the arrival leaked is dropped on the way out.
     let payload = store
         .get(&job.storage_key)
         .await
@@ -1021,6 +1082,10 @@ async fn auto_forwards_an_arriving_message_once() {
         "the forwarded message keeps its own headers: {text}"
     );
     assert!(text.contains("body line"));
+    assert!(
+        !text.to_lowercase().contains("bcc"),
+        "a forwarded copy must not name blind recipients: {text}"
+    );
 
     // Clean up the fixtures, including the stored arrivals and the forwarded copy.
     let arrivals = message::Entity::find()

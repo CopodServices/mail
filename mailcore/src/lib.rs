@@ -4,6 +4,7 @@ pub mod body;
 pub mod compose;
 pub mod config;
 pub mod forward;
+pub mod headers;
 pub mod meta;
 pub mod policy;
 pub mod query;

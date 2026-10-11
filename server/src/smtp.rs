@@ -4,11 +4,13 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use entity::message;
 use mailcore::address;
+use mailcore::headers;
 use mailcore::policy::{self, AuthAction, AuthOutcome};
 use mailcore::repo;
 use mailcore::stream::{Conn, InboundStream};
 use smtp_proto::response::generate::BitToString;
 use smtp_proto::{Request, Response};
+use std::borrow::Cow;
 use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -437,6 +439,14 @@ impl Session {
         }
 
         let mut failed = false;
+        // A submission may name blind recipients, and only the sender may read
+        // them: the copy the Sent folder keeps has the Bcc header, and every copy
+        // that leaves the sender's hands is stripped of it. Inbound mail is
+        // stored as it arrived, which stays the record of what was sent.
+        let delivered: Cow<'_, [u8]> = match self.mode {
+            Mode::Submission => headers::strip_bcc(&raw),
+            Mode::Inbound => Cow::Borrowed(raw.as_slice()),
+        };
         // The copy this submission owns, so its row can report the job state.
         let mut copy_message_id = None;
 
@@ -470,7 +480,7 @@ impl Session {
                 message::Direction::Inbound,
                 &envelope_from,
                 &mailbox.address,
-                &raw,
+                &delivered,
                 &outcome,
             )
             .await
@@ -487,7 +497,7 @@ impl Session {
                 mailbox_id,
                 &envelope_from,
                 &remote,
-                &raw,
+                &delivered,
                 copy_message_id,
             )
             .await

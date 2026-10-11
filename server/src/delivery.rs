@@ -4,7 +4,7 @@ use chrono::Utc;
 use entity::{mailbox, message, outbound_job};
 use mailcore::forward::{self, already_forwarded};
 use mailcore::policy::AuthOutcome;
-use mailcore::{address, meta, repo, srs, store};
+use mailcore::{address, headers, meta, repo, srs, store};
 use sea_orm::Set;
 use uuid::Uuid;
 
@@ -116,10 +116,11 @@ pub async fn store_local(
 ///
 /// The envelope sender is rewritten with SRS on the mailbox's own domain, which
 /// is what the relay asks of forwarded mail, and the message goes out as it
-/// arrived so its own DKIM signature still authenticates it. A relay that
-/// refuses the sender's domain is answered by the queue, which resends the copy
-/// as the mailbox itself. Returns the queued job id, or None when there is
-/// nothing to forward.
+/// arrived so its own DKIM signature still authenticates it. A Bcc header the
+/// arrival leaked is dropped when the copy is queued, so the forward cannot pass
+/// the blind recipients on. A relay that refuses the sender's domain is answered
+/// by the queue, which resends the copy as the mailbox itself. Returns the queued
+/// job id, or None when there is nothing to forward.
 pub async fn forward_inbound(
     state: &AppState,
     mailbox: &mailbox::Model,
@@ -164,7 +165,8 @@ pub async fn forward_inbound(
     )
     .unwrap_or_else(|| mailbox.address.clone());
 
-    // The message goes out byte for byte, so the sender's DKIM survives.
+    // The message goes out as it arrived, so the sender's DKIM survives; a Bcc
+    // header the arrival leaked is dropped when the copy is queued.
     let forwarded = forward::mark(raw, &mailbox.address);
     let job = enqueue_remote(
         state,
@@ -216,14 +218,18 @@ pub async fn enqueue_remote_at(
     let id = Uuid::now_v7();
     let now = Utc::now();
     let key = store::outbound_key(&id, now);
+    // The bytes a relay is handed lose the Bcc header: those addresses belong in
+    // the envelope, and the sender's own copy is the one place the header is
+    // kept. Stripping here is what a path that queues a copy cannot forget.
+    let payload = headers::strip_bcc(raw);
 
     state
         .store
-        .put(&key, raw.to_vec())
+        .put(&key, payload.to_vec())
         .await
         .context("failed to write the outgoing message to object storage")?;
 
-    let metadata = meta::extract(raw);
+    let metadata = meta::extract(&payload);
     repo::enqueue_job(
         &state.db,
         outbound_job::ActiveModel {

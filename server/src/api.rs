@@ -13,7 +13,7 @@ use entity::{contact, folder, message, message_flag, outbound_job, setting, temp
 use mailcore::policy::AuthOutcome;
 use mailcore::query;
 use mailcore::{address, repo};
-use mailcore::{body, compose, store};
+use mailcore::{body, compose, headers, store};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
 };
@@ -3939,6 +3939,11 @@ pub async fn send(
     })
     .map_err(internal)?;
 
+    // The Bcc header is the sender's alone. The copy filed in their Sent folder
+    // keeps it; every copy that reaches anybody else is stripped of it first, so
+    // a blind recipient is never named in another mailbox.
+    let delivered = headers::strip_bcc(&raw);
+
     let outcome = AuthOutcome::skipped();
     let scheduled_at = body.scheduled_at.filter(|at| *at > chrono::Utc::now());
     let mut stored = 0usize;
@@ -3987,7 +3992,7 @@ pub async fn send(
             message::Direction::Inbound,
             &sender,
             &mailbox.address,
-            &raw,
+            &delivered,
             &outcome,
         )
         .await
@@ -4003,7 +4008,7 @@ pub async fn send(
             None,
             &sender,
             &remote,
-            &raw,
+            &delivered,
             scheduled_at,
             delivery::SendCopies {
                 copy_message_id,
@@ -4014,7 +4019,7 @@ pub async fn send(
         .map_err(internal)?;
         queued = remote.len();
     } else if !remote.is_empty() {
-        delivery::enqueue_remote(&state, None, &sender, &remote, &raw, copy_message_id)
+        delivery::enqueue_remote(&state, None, &sender, &remote, &delivered, copy_message_id)
             .await
             .map_err(internal)?;
         queued = remote.len();

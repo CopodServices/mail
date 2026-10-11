@@ -56,7 +56,9 @@ flowchart LR
 - **Submission (:2587 locally, :587 in production)** — requires AUTH (PLAIN or
   LOGIN, argon2 password hashes) and the envelope sender must match the
   authenticated mailbox. Mail to a local mailbox is stored; anything else is
-  queued for the relay.
+  queued for the relay. A Bcc header the client submitted is kept on the
+  sender's own copy alone: a copy stored in another mailbox, and the copy the
+  relay is handed, are stripped of it before they are written.
 - **Relay worker** — claims queued messages and hands the stored bytes to the
   smarthost over STARTTLS or implicit TLS with AUTH, retrying with exponential
   backoff (capped at six hours). A permanent 5xx rejection (bad SPF/DKIM/MX, an

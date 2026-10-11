@@ -147,22 +147,8 @@ pub fn rewrite_sender(raw: &[u8], address: &str, display_name: Option<&str>) -> 
 
 /// Splits a stored message into its header block and the body after it.
 fn split_headers(raw: &[u8]) -> (String, &[u8]) {
-    if let Some(position) = find_bytes(raw, b"\r\n\r\n") {
-        let (headers, rest) = raw.split_at(position);
-        return (String::from_utf8_lossy(headers).to_string(), &rest[4..]);
-    }
-    if let Some(position) = find_bytes(raw, b"\n\n") {
-        let (headers, rest) = raw.split_at(position);
-        return (String::from_utf8_lossy(headers).to_string(), &rest[2..]);
-    }
-    (String::from_utf8_lossy(raw).to_string(), b"")
-}
-
-/// The offset of the first occurrence of a byte needle in a haystack, if any.
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+    let (block, _, body) = crate::headers::split_message(raw);
+    (String::from_utf8_lossy(block).to_string(), body)
 }
 
 #[cfg(test)]
