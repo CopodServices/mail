@@ -1044,7 +1044,7 @@ async fn neighbors_walk_the_reading_order_within_a_folder() {
         &mailbox,
         message::Direction::Inbound,
         message::Status::Stored,
-        5,
+        4,
     )
     .await;
     let b = insert_message(
@@ -1052,7 +1052,7 @@ async fn neighbors_walk_the_reading_order_within_a_folder() {
         &mailbox,
         message::Direction::Inbound,
         message::Status::Stored,
-        4,
+        5,
     )
     .await;
     let c = insert_message(
