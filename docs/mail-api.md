@@ -118,6 +118,13 @@ video, plain text, CSV or JSON) is served inline; every other type, including
 HTML, SVG and XML, stays a download so a preview URL can never run script in the
 mail origin. Without the query the part always downloads.
 
+Each listed part also carries its content_id, when it has one (the Content-ID
+without the angle brackets its header writes). A body embeds a part with a
+cid: reference, and senders spell that reference as the Content-ID, its local
+part before the @ host, or the filename, so the reader maps all three onto the
+part's preview URL and draws it in place. The reference is rewritten in the
+browser; the API itself never rewrites the stored body.
+
 A mailbox may carry one auto-forward address (forward_to). A copy of each message
 delivered to that mailbox is queued to the address. The message goes out exactly
 as it arrived, so its own DKIM signature still authenticates it at the
