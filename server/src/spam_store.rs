@@ -150,17 +150,26 @@ async fn retrain_scope(
     if samples.is_empty() {
         return;
     }
-    let mut model = engine.classifier().fresh();
-    let mut order: Vec<usize> = (0..samples.len()).collect();
-    for _ in 0..RETRAIN_EPOCHS {
-        order.shuffle(&mut rand::thread_rng());
-        for idx in &order {
-            let (tokens, is_spam) = &samples[*idx];
-            model.learn(tokens, *is_spam);
+    // FTRL over thousands of samples is CPU work; keep it off the async workers
+    // so the SMTP, IMAP and HTTP paths keep responding while it runs.
+    let fresh = engine.classifier().fresh();
+    let sample_count = samples.len();
+    let model = tokio::task::spawn_blocking(move || {
+        let mut model = fresh;
+        let mut order: Vec<usize> = (0..samples.len()).collect();
+        for _ in 0..RETRAIN_EPOCHS {
+            order.shuffle(&mut rand::thread_rng());
+            for idx in &order {
+                let (tokens, is_spam) = &samples[*idx];
+                model.learn(tokens, *is_spam);
+            }
         }
-    }
+        model
+    })
+    .await
+    .unwrap_or_else(|_| engine.classifier().fresh());
     engine.classifier().replace(scope, model);
-    tracing::info!(scope = %scope, samples = samples.len(), "retrained the spam classifier");
+    tracing::info!(scope = %scope, samples = sample_count, "retrained the spam classifier");
 }
 
 async fn sample_counts(state: &AppState, mailbox_id: Option<Uuid>) -> (i64, i64) {

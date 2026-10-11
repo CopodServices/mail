@@ -23,8 +23,29 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // The worker count follows the container's CPU quota, and can be raised
+    // explicitly with WORKER_THREADS. A single-worker runtime serialises every
+    // parse, scan and search, so the deployment must also allow more than one
+    // core for this to pay off.
+    let workers = std::env::var("WORKER_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(4)
+        });
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .context("failed to start the async runtime")?;
+    runtime.block_on(run(workers))
+}
+
+async fn run(workers: usize) -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
     tracing_subscriber::registry()
@@ -36,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Arc::new(Config::load());
-    info!(hostname = %config.hostname, "🚀 Starting the mail service");
+    info!(hostname = %config.hostname, workers, "🚀 Starting the mail service");
 
     let db = sea_orm::Database::connect(&config.database_url)
         .await
