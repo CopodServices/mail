@@ -14,6 +14,9 @@ pub struct AppState {
     pub authenticator: Option<Arc<MessageAuthenticator>>,
     /// None when spam filtering is off.
     pub spam: Option<Arc<SpamEngine>>,
+    /// Bounds how many message bodies are read and scanned at once, so a burst
+    /// of large messages cannot multiply memory without limit.
+    pub data_slots: Arc<tokio::sync::Semaphore>,
     pub tls: Option<Arc<rustls::ServerConfig>>,
     /// Live updates for connected clients; each message is a JSON frame.
     pub events: tokio::sync::broadcast::Sender<String>,

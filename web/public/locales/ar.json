@@ -312,6 +312,7 @@
 	"settings.spam.empty": "None yet",
 	"spam.title": "Spam score",
 	"spam.score": "Score",
+	"spam.contributions": "المساهمات",
 	"spam.verdict": "Verdict",
 	"spam.verdict.inbox": "Inbox",
 	"spam.verdict.suspicious": "Suspicious",

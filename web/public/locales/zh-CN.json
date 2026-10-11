@@ -312,6 +312,7 @@
 	"settings.spam.empty": "None yet",
 	"spam.title": "Spam score",
 	"spam.score": "Score",
+	"spam.contributions": "各项得分",
 	"spam.verdict": "Verdict",
 	"spam.verdict.inbox": "Inbox",
 	"spam.verdict.suspicious": "Suspicious",

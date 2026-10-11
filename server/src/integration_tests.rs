@@ -93,6 +93,7 @@ async fn stores_inbound_mail_to_s3_and_postgres() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -197,6 +198,7 @@ async fn files_over_threshold_inbound_as_spam() {
         store: store.clone(),
         authenticator: None,
         spam: Some(engine),
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -301,6 +303,7 @@ async fn relays_submission_through_the_smarthost() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -534,6 +537,7 @@ async fn a_blind_recipient_is_named_by_their_own_copy() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -651,6 +655,7 @@ async fn sends_a_reply_with_its_conversation_headers() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -824,6 +829,7 @@ async fn enforces_the_mailbox_storage_quota() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -967,6 +973,7 @@ async fn sessions_scope_a_mailbox_and_the_operator_key_manages_tenants() {
         store,
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -1602,6 +1609,7 @@ async fn auto_forwards_an_arriving_message_once() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -1823,6 +1831,7 @@ async fn preview_serves_only_renderable_attachments_inline() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -2105,6 +2114,7 @@ async fn deleting_a_mailbox_takes_its_messages_and_objects() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -2179,6 +2189,7 @@ async fn a_message_without_its_object_reads_as_gone() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -2253,6 +2264,7 @@ async fn imap_reads_the_inbox_and_applies_flags() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };
@@ -2420,6 +2432,7 @@ async fn pop3_downloads_and_deletes_the_drop() {
         store: store.clone(),
         authenticator: None,
         spam: None,
+        data_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         tls: None,
         events: tokio::sync::broadcast::channel(16).0,
     };

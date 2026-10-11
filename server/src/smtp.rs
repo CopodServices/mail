@@ -423,6 +423,11 @@ impl Session {
             return self.reply(554, 5, 5, 1, "No valid recipients").await;
         }
 
+        // Bound how many message bodies are held at once. A client waiting for
+        // this reply has not sent its DATA yet, so the wait costs no memory.
+        let slots = self.state.data_slots.clone();
+        let _slot = slots.acquire().await;
+
         self.reply(354, 3, 0, 0, "End data with <CR><LF>.<CR><LF>")
             .await?;
 
@@ -448,6 +453,10 @@ impl Session {
             Mode::Inbound => self.scan_spam(&raw, &outcome).await,
             Mode::Submission => None,
         };
+
+        // Parsed once and shared by every local copy, so a message addressed to
+        // several mailboxes is not re-parsed for each one.
+        let metadata = mailcore::meta::extract(&raw);
 
         let envelope_from = self.mail_from.clone().unwrap_or_default();
         let recipients = std::mem::take(&mut self.recipients);
@@ -527,6 +536,7 @@ impl Session {
                 &outcome,
                 verdict.as_ref(),
                 quarantine,
+                &metadata,
             )
             .await
             {

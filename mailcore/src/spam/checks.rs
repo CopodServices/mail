@@ -267,26 +267,44 @@ fn add_body_tags(elements: &Elements, config: &SpamConfig, tags: &mut Tags) {
     if !elements.html_body.is_empty() && elements.text_body.trim().is_empty() {
         tag(tags, "HTML_ONLY");
     }
-    let html = elements.html_body.to_ascii_lowercase();
-    if html.contains("<script") {
+    // Scanned in place: lowercasing the HTML body or building a subject+body
+    // haystack would copy the whole message on every scan.
+    let html = elements.html_body.as_str();
+    if contains_ci(html, "<script") {
         tag(tags, "HTML_SCRIPT");
     }
-    if html.contains("<iframe") {
+    if contains_ci(html, "<iframe") {
         tag(tags, "HTML_IFRAME");
     }
-    if html.contains("<form") {
+    if contains_ci(html, "<form") {
         tag(tags, "HTML_FORM");
     }
-    if html.contains("<img") && elements.text_body.trim().len() < 40 {
+    if contains_ci(html, "<img") && elements.text_body.trim().len() < 40 {
         tag(tags, "HTML_IMAGE_ONLY");
     }
-    let haystack = format!("{} {}", elements.subject, elements.text_body).to_ascii_lowercase();
     for word in &config.spam_words {
-        if !word.is_empty() && haystack.contains(&word.to_ascii_lowercase()) {
+        if word.is_empty() {
+            continue;
+        }
+        if contains_ci(&elements.subject, word) || contains_ci(&elements.text_body, word) {
             tags.entry(format!("BODY_SPAM_WORD_{}", sanitize(word)))
                 .or_insert(None);
         }
     }
+}
+
+/// Case-insensitive ASCII substring search that does not copy the haystack.
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    let hay = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > hay.len() {
+        return false;
+    }
+    hay.windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn add_url_tags(elements: &Elements, tags: &mut Tags) {
@@ -430,6 +448,14 @@ mod tests {
         );
         assert!(is_all_caps(&elements.subject));
         assert!(elements.url_hosts.contains(&"bit.ly".to_string()));
+    }
+
+    #[test]
+    fn case_insensitive_scans_without_folding() {
+        assert!(contains_ci("Hello <SCRIPT> world", "<script"));
+        assert!(!contains_ci("nothing here", "<script"));
+        assert!(contains_ci("anything", ""));
+        assert!(!contains_ci("ab", "abc"));
     }
 
     #[test]

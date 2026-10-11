@@ -22,6 +22,7 @@ pub async fn store_local(
     raw: &[u8],
     outcome: &AuthOutcome,
 ) -> Result<Uuid> {
+    let metadata = meta::extract(raw);
     store_local_with_spam(
         state,
         mailbox,
@@ -32,6 +33,7 @@ pub async fn store_local(
         outcome,
         None,
         false,
+        &metadata,
     )
     .await
 }
@@ -53,6 +55,7 @@ pub async fn store_local_with_spam(
     outcome: &AuthOutcome,
     verdict: Option<&mailcore::spam::Verdict>,
     quarantine: bool,
+    metadata: &meta::Metadata,
 ) -> Result<Uuid> {
     // Refuse a message that would push the mailbox past its storage quota; a
     // zero quota means unlimited. Checked before the object-store write so an
@@ -81,13 +84,14 @@ pub async fn store_local_with_spam(
         Some(verdict) => verdict.prepend(raw),
         None => raw.to_vec(),
     };
+    // Kept for the row's size before the buffer moves into the object store.
+    let stored_len = stored.len() as i64;
     state
         .store
-        .put(&key, stored.clone())
+        .put(&key, stored)
         .await
         .context("failed to write the message to object storage")?;
 
-    let metadata = meta::extract(raw);
     // Kept for the live-update frame after the row is inserted.
     let sender = metadata
         .header_from
@@ -114,12 +118,12 @@ pub async fn store_local_with_spam(
             status: Set(status),
             envelope_from: Set(envelope_from.to_string()),
             envelope_to: Set(envelope_to.to_string()),
-            message_id: Set(metadata.message_id),
-            subject: Set(metadata.subject),
-            header_from: Set(metadata.header_from),
-            in_reply_to: Set(metadata.in_reply_to),
-            references_header: Set(metadata.references),
-            size_bytes: Set(stored.len() as i64),
+            message_id: Set(metadata.message_id.clone()),
+            subject: Set(metadata.subject.clone()),
+            header_from: Set(metadata.header_from.clone()),
+            in_reply_to: Set(metadata.in_reply_to.clone()),
+            references_header: Set(metadata.references.clone()),
+            size_bytes: Set(stored_len),
             storage_key: Set(key),
             spf_result: Set(outcome.spf.clone()),
             dkim_result: Set(outcome.dkim.clone()),

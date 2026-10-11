@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         store: store.clone(),
         authenticator,
         spam,
+        data_slots: Arc::new(tokio::sync::Semaphore::new(16)),
         tls,
         events,
     };

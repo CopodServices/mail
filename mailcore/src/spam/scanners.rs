@@ -50,8 +50,20 @@ pub async fn scan(
     outcome
 }
 
+/// Messages larger than this are not sent to Tika: the request body copies the
+/// whole message, and the classifier gains little from very large ones.
+pub const TIKA_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// Whether a message is small enough to hand to Tika.
+pub fn tika_candidate(len: usize) -> bool {
+    len <= TIKA_MAX_BYTES
+}
+
 /// Tika text extraction, used to feed attachment content into the classifier.
 pub async fn extract_text(client: &reqwest::Client, url: &str, raw: &[u8]) -> Option<String> {
+    if !tika_candidate(raw.len()) {
+        return None;
+    }
     let response = client
         .put(url)
         .header("Accept", "text/plain")
@@ -132,6 +144,13 @@ mod tests {
             sanitize(&parse_clamd_reply("stream: Eicar-Test-Signature FOUND").unwrap()),
             "EICARTESTSIGNATURE"
         );
+    }
+
+    #[test]
+    fn tika_skips_large_messages() {
+        assert!(tika_candidate(1024));
+        assert!(tika_candidate(TIKA_MAX_BYTES));
+        assert!(!tika_candidate(TIKA_MAX_BYTES + 1));
     }
 
     #[tokio::test]
