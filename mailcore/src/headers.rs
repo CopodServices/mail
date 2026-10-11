@@ -36,9 +36,49 @@ pub fn strip_bcc(raw: &[u8]) -> Cow<'_, [u8]> {
     if !dropped {
         return Cow::Borrowed(raw);
     }
+    // The separator carries the newline that ended the last header line, so a
+    // kept block still ending with one would gain a blank line where the header
+    // that was dropped used to be.
+    if kept.ends_with(b"\r\n") {
+        kept.truncate(kept.len() - 2);
+    } else if kept.ends_with(b"\n") {
+        kept.truncate(kept.len() - 1);
+    }
     kept.extend_from_slice(separator);
     kept.extend_from_slice(body);
     Cow::Owned(kept)
+}
+
+/// The same message with every Bcc header dropped and one address named.
+///
+/// This is the copy a blind recipient reads. It names them and nobody else,
+/// which is how a blind copy tells its recipient it was one without naming the
+/// other blind recipients; a copy that carried the whole list would tell each of
+/// them about all the others. Only the sender's own copy keeps the list.
+pub fn bcc_for(raw: &[u8], address: &str) -> Vec<u8> {
+    let stripped = strip_bcc(raw);
+    let (block, separator, body) = split_message(&stripped);
+    // The message's own line ending, so the header block stays uniform.
+    let ending: &[u8] = if raw.windows(2).any(|window| window == b"\r\n") {
+        b"\r\n"
+    } else {
+        b"\n"
+    };
+    let mut out = Vec::with_capacity(raw.len() + address.len() + 8);
+    out.extend_from_slice(block);
+    if !block.is_empty() && !block.ends_with(b"\n") {
+        out.extend_from_slice(ending);
+    }
+    out.extend_from_slice(format!("Bcc: <{address}>").as_bytes());
+    if separator.is_empty() {
+        // A message with no blank line has no body to be separated from.
+        out.extend_from_slice(ending);
+    } else {
+        // The separator ends this header line and is the blank line after it.
+        out.extend_from_slice(separator);
+    }
+    out.extend_from_slice(body);
+    out
 }
 
 /// True when a header line starts a Bcc header, whatever its case or spacing.
@@ -82,7 +122,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_bcc;
+    use super::{bcc_for, strip_bcc};
     use std::borrow::Cow;
 
     #[test]
@@ -147,5 +187,58 @@ mod tests {
     fn a_message_that_is_only_a_bcc_header_keeps_its_body() {
         let raw = b"Bcc: dave@example.test\r\n\r\nbody";
         assert_eq!(String::from_utf8_lossy(&strip_bcc(raw)), "\r\n\r\nbody");
+    }
+
+    #[test]
+    fn a_bcc_that_ends_the_header_block_leaves_no_blank_line() {
+        let raw = b"To: bob@example.test\r\nBcc: dave@example.test\r\n\r\nbody\r\n";
+        assert_eq!(
+            String::from_utf8_lossy(&strip_bcc(raw)),
+            "To: bob@example.test\r\n\r\nbody\r\n"
+        );
+    }
+
+    #[test]
+    fn a_blind_copy_names_its_own_recipient_alone() {
+        let raw = concat!(
+            "From: alice@example.test\r\n",
+            "To: bob@example.test\r\n",
+            "Bcc: carol@example.test, dave@example.test\r\n",
+            "Subject: hi\r\n",
+            "\r\n",
+            "body\r\n",
+        )
+        .as_bytes();
+        let text = String::from_utf8_lossy(&bcc_for(raw, "carol@example.test")).to_string();
+        assert_eq!(
+            text,
+            concat!(
+                "From: alice@example.test\r\n",
+                "To: bob@example.test\r\n",
+                "Subject: hi\r\n",
+                "Bcc: <carol@example.test>\r\n",
+                "\r\n",
+                "body\r\n",
+            )
+        );
+        assert!(!text.contains("dave@example.test"), "{text}");
+    }
+
+    #[test]
+    fn a_message_without_a_bcc_header_gains_the_one_it_is_given() {
+        let raw = b"To: bob@example.test\r\nSubject: hi\r\n\r\nbody";
+        let text = String::from_utf8_lossy(&bcc_for(raw, "carol@example.test")).to_string();
+        assert!(text.contains("\r\nBcc: <carol@example.test>\r\n"), "{text}");
+        assert!(text.ends_with("\r\n\r\nbody"), "{text}");
+    }
+
+    #[test]
+    fn an_lf_only_message_keeps_its_own_line_ending() {
+        let raw = b"To: bob@example.test\nSubject: hi\n\nbody\n";
+        let text = String::from_utf8_lossy(&bcc_for(raw, "carol@example.test")).to_string();
+        assert_eq!(
+            text,
+            "To: bob@example.test\nSubject: hi\nBcc: <carol@example.test>\n\nbody\n"
+        );
     }
 }

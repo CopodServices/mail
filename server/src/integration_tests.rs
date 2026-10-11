@@ -232,6 +232,9 @@ async fn relays_submission_through_the_smarthost() {
     assert_eq!(read_reply(&mut reader).await, 250);
     command(&mut write_half, &format!("RCPT TO:<{local_address}>")).await;
     assert_eq!(read_reply(&mut reader).await, 250);
+    // The blind recipient is enveloped too, so its copy is handed over.
+    command(&mut write_half, "RCPT TO:<blind@remote.test>").await;
+    assert_eq!(read_reply(&mut reader).await, 250);
 
     command(&mut write_half, "DATA").await;
     assert_eq!(read_reply(&mut reader).await, 354);
@@ -252,21 +255,48 @@ async fn relays_submission_through_the_smarthost() {
     command(&mut write_half, "QUIT").await;
     assert_eq!(read_reply(&mut reader).await, 221);
 
-    let jobs = outbound_job::Entity::find().all(&db).await.unwrap();
+    // Scoped to this run's sender: the database is shared with the other fixtures.
+    let jobs = outbound_job::Entity::find()
+        .filter(outbound_job::Column::EnvelopeFrom.eq(address.clone()))
+        .all(&db)
+        .await
+        .unwrap();
+    // The openly addressed recipient travels on one copy, the blind recipient on
+    // another: each job is one set of recipients that may read the same bytes.
     let job = jobs
-        .into_iter()
-        .find(|job| job.envelope_from == address)
-        .expect("a queued job for this sender");
+        .iter()
+        .find(|job| job.recipients == serde_json::json!(["friend@remote.test"]))
+        .expect("a job for the openly addressed recipient")
+        .clone();
+    assert_eq!(job.envelope_from, address);
     assert_eq!(job.status, outbound_job::JobStatus::Pending);
-    assert_eq!(
-        job.recipients,
-        serde_json::json!(["friend@remote.test"]),
-        "recipients should be captured from RCPT TO"
+    let blind_job = jobs
+        .iter()
+        .find(|job| job.recipients == serde_json::json!(["blind@remote.test"]))
+        .expect("a job for the blind recipient")
+        .clone();
+    // The blind recipient's copy names them and nobody else; the copy the openly
+    // addressed recipient is handed names no blind recipient at all. The sender's
+    // own Sent copy is the one that keeps the list.
+    let blind_copy = store
+        .get(&blind_job.storage_key)
+        .await
+        .expect("read the blind copy");
+    let blind_text = String::from_utf8_lossy(&blind_copy).to_string();
+    assert!(
+        blind_text.contains("Bcc: <blind@remote.test>"),
+        "{blind_text}"
     );
-
-    // A Bcc names a recipient only the sender may see, so the copy handed to the
-    // relay and the copy a local recipient gets are both stripped of the header.
-    // The sender's own Sent copy is the one that keeps it.
+    let bcc_line = blind_text
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("bcc:"))
+        .expect("a Bcc header on the blind copy")
+        .trim()
+        .to_string();
+    assert_eq!(
+        bcc_line, "Bcc: <blind@remote.test>",
+        "the blind copy names its own recipient and nobody else"
+    );
     let queued = store
         .get(&job.storage_key)
         .await
@@ -319,7 +349,7 @@ async fn relays_submission_through_the_smarthost() {
         max_attempts: 3,
         helo: config.hostname.clone(),
     };
-    assert_eq!(queue.run_once().await.unwrap(), 1);
+    assert_eq!(queue.run_once().await.unwrap(), 2);
 
     let job = outbound_job::Entity::find_by_id(job.id)
         .one(&db)
@@ -332,14 +362,314 @@ async fn relays_submission_through_the_smarthost() {
         "relay should accept"
     );
     assert!(job.attempts <= 1);
+    let blind_out = outbound_job::Entity::find_by_id(blind_job.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("blind job still present");
+    assert_eq!(
+        blind_out.status,
+        outbound_job::JobStatus::Sent,
+        "the relay accepts the blind copy too"
+    );
 
     // Clean up the fixtures.
     let _ = store.delete(&job.storage_key).await;
+    let _ = store.delete(&blind_job.storage_key).await;
     let _ = store.delete(&sent[0].storage_key).await;
     let _ = store.delete(&inbox[0].storage_key).await;
     let _ = outbound_job::Entity::delete_by_id(job.id).exec(&db).await;
+    let _ = outbound_job::Entity::delete_by_id(blind_job.id)
+        .exec(&db)
+        .await;
     let _ = repo::delete_mailbox(&db, &address).await;
     let _ = repo::delete_mailbox(&db, &local_address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
+/// A blind recipient is told by their own copy: it names them and nobody else,
+/// and no copy another recipient reads names any blind recipient.
+#[tokio::test]
+async fn a_blind_recipient_is_named_by_their_own_copy() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let config = Arc::new(test_config());
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let store = MailStore::new(&config.s3).expect("object store");
+
+    let domain = format!("blind-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let address = format!("sender@{domain}");
+    let sender = repo::create_mailbox(&db, &address, "secret").await.unwrap();
+    let friend = format!("friend@{domain}");
+    let friend_box = repo::create_mailbox(&db, &friend, "secret").await.unwrap();
+    let blind = format!("blind@{domain}");
+    let blind_box = repo::create_mailbox(&db, &blind, "secret").await.unwrap();
+
+    let state = AppState {
+        db: db.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        authenticator: None,
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+
+    let app = crate::api::router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/send")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "from": address,
+                        "to": [friend],
+                        "bcc": [blind],
+                        "subject": "Blind copy",
+                        "text": "hello",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let friend_copy = only_copy(&db, &store, friend_box.id).await;
+    assert!(
+        !friend_copy.to_lowercase().contains("bcc"),
+        "the addressed recipient is told nothing about it: {friend_copy}"
+    );
+    let blind_copy = only_copy(&db, &store, blind_box.id).await;
+    assert!(
+        blind_copy.contains(&format!("Bcc: <{blind}>")),
+        "the blind recipient is named by their own copy: {blind_copy}"
+    );
+    let bcc_line = blind_copy
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("bcc:"))
+        .expect("a Bcc header on the blind copy")
+        .trim()
+        .to_string();
+    assert_eq!(
+        bcc_line,
+        format!("Bcc: <{blind}>"),
+        "the blind copy names its own recipient and nobody else"
+    );
+    let own_copy = only_copy(&db, &store, sender.id).await;
+    assert!(
+        own_copy.contains(&format!("Bcc: <{blind}>")),
+        "the sender keeps the list: {own_copy}"
+    );
+
+    // Clean up the fixtures.
+    for id in [sender.id, friend_box.id, blind_box.id] {
+        let stored = message::Entity::find()
+            .filter(message::Column::MailboxId.eq(id))
+            .all(&db)
+            .await
+            .unwrap();
+        for row in &stored {
+            let _ = store.delete(&row.storage_key).await;
+            let _ = repo::delete_message(&db, row.id).await;
+        }
+    }
+    let _ = repo::delete_mailbox(&db, &address).await;
+    let _ = repo::delete_mailbox(&db, &friend).await;
+    let _ = repo::delete_mailbox(&db, &blind).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
+/// A reply composed here goes out threaded and stamped with our own hostname: the
+/// conversation headers the composer stored on the draft ride along with the send,
+/// and the Message-ID is built on MAIL_HOSTNAME rather than the pod name.
+#[tokio::test]
+async fn sends_a_reply_with_its_conversation_headers() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let config = Arc::new(test_config());
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let store = MailStore::new(&config.s3).expect("object store");
+
+    let domain = format!("reply-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let address = format!("sender@{domain}");
+    let mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
+    let friend = format!("friend@{domain}");
+    let friend_mailbox = repo::create_mailbox(&db, &friend, "secret").await.unwrap();
+
+    let state = AppState {
+        db: db.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        authenticator: None,
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+
+    // Without an API key the caller is the operator, which is how the fixtures run.
+    let call = |request: Request<Body>| {
+        let app = crate::api::router(state.clone());
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (status, String::from_utf8_lossy(&bytes).to_string())
+        }
+    };
+
+    // What the composer stores when the user replies.
+    let draft = call(
+        Request::builder()
+            .method("POST")
+            .uri("/api/drafts")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "from": address,
+                    "to": friend,
+                    "subject": "Re: Integration test",
+                    "text": "a reply",
+                    "in_reply_to": "root@remote.test",
+                    "references_header": "root@remote.test",
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(draft.0, StatusCode::CREATED, "{}", draft.1);
+    let draft: serde_json::Value = serde_json::from_str(&draft.1).expect("a draft body");
+    let draft_id = draft["data"]["id"]
+        .as_str()
+        .expect("the draft id")
+        .to_string();
+
+    // Sending it carries those headers onto the wire, and names itself on the
+    // hostname this server is configured with.
+    let sent = call(
+        Request::builder()
+            .method("POST")
+            .uri("/api/send")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "from": address,
+                    "to": [friend],
+                    "subject": "Re: Integration test",
+                    "text": "a reply",
+                    "draft_id": draft_id,
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(sent.0, StatusCode::ACCEPTED, "{}", sent.1);
+
+    // A reply the composer has not saved as a draft carries the headers on the
+    // request itself, which is the path a quick Send takes.
+    let again = call(
+        Request::builder()
+            .method("POST")
+            .uri("/api/send")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "from": address,
+                    "to": [friend],
+                    "subject": "Re: Integration test",
+                    "text": "a reply with no draft",
+                    "in_reply_to": "root@remote.test",
+                    "references_header": "root@remote.test",
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(again.0, StatusCode::ACCEPTED, "{}", again.1);
+
+    let copy = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox.id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(copy.len(), 2, "the sender keeps both replies");
+    let mut ids = Vec::new();
+    for row in &copy {
+        let raw = store
+            .get(&row.storage_key)
+            .await
+            .expect("read the sent copy");
+        let text = String::from_utf8_lossy(&raw).to_string();
+        assert!(text.contains("In-Reply-To: <root@remote.test>"), "{text}");
+        assert!(text.contains("References: <root@remote.test>"), "{text}");
+        let message_id = text
+            .lines()
+            .find_map(|line| line.strip_prefix("Message-ID: "))
+            .map(|value| value.trim().to_string())
+            .expect("a Message-ID");
+        assert!(
+            message_id.ends_with("@mx.example.test>"),
+            "the configured hostname, not the pod name: {message_id}"
+        );
+        ids.push(message_id);
+    }
+    assert_ne!(ids[0], ids[1], "each message names itself");
+
+    // Clean up the fixtures.
+    for id in [mailbox.id, friend_mailbox.id] {
+        let stored = message::Entity::find()
+            .filter(message::Column::MailboxId.eq(id))
+            .all(&db)
+            .await
+            .unwrap();
+        for row in &stored {
+            let _ = store.delete(&row.storage_key).await;
+            let _ = repo::delete_message(&db, row.id).await;
+        }
+    }
+    let _ = repo::delete_mailbox(&db, &address).await;
+    let _ = repo::delete_mailbox(&db, &friend).await;
     let _ = entity::domain::Entity::delete_many()
         .filter(entity::domain::Column::Name.eq(domain))
         .exec(&db)
@@ -1425,4 +1755,23 @@ async fn set_flag(
     .insert(db)
     .await
     .unwrap();
+}
+
+/// The raw bytes of the one message a mailbox owns, for asserting on headers.
+async fn only_copy(
+    db: &sea_orm::DatabaseConnection,
+    store: &MailStore,
+    mailbox_id: Uuid,
+) -> String {
+    let stored = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox_id))
+        .all(db)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1, "one stored copy");
+    let raw = store
+        .get(&stored[0].storage_key)
+        .await
+        .expect("read the copy");
+    String::from_utf8_lossy(&raw).to_string()
 }

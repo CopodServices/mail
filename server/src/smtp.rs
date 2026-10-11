@@ -4,13 +4,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use entity::message;
 use mailcore::address;
-use mailcore::headers;
 use mailcore::policy::{self, AuthAction, AuthOutcome};
 use mailcore::repo;
 use mailcore::stream::{Conn, InboundStream};
 use smtp_proto::response::generate::BitToString;
 use smtp_proto::{Request, Response};
-use std::borrow::Cow;
 use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -439,13 +437,19 @@ impl Session {
         }
 
         let mut failed = false;
-        // A submission may name blind recipients, and only the sender may read
-        // them: the copy the Sent folder keeps has the Bcc header, and every copy
-        // that leaves the sender's hands is stripped of it. Inbound mail is
-        // stored as it arrived, which stays the record of what was sent.
-        let delivered: Cow<'_, [u8]> = match self.mode {
-            Mode::Submission => headers::strip_bcc(&raw),
-            Mode::Inbound => Cow::Borrowed(raw.as_slice()),
+        // A submission may name blind recipients: the copy the Sent folder keeps
+        // has the Bcc header, each blind recipient's copy names them and nobody
+        // else, and the copies that reach anybody else name no blind recipient.
+        // Inbound mail is handed on as it arrived, which stays the record of what
+        // was sent.
+        let blind = match self.mode {
+            Mode::Submission => mailcore::body::blind_recipients(&raw),
+            Mode::Inbound => Vec::new(),
+        };
+        let is_blind = |address: &str| {
+            blind
+                .iter()
+                .any(|blind| blind.eq_ignore_ascii_case(address))
         };
         // The copy this submission owns, so its row can report the job state.
         let mut copy_message_id = None;
@@ -474,13 +478,18 @@ impl Session {
 
         // Either way a local recipient gets it in its inbox.
         for mailbox in &local {
+            let copy = delivery::recipient_copy(&raw, &mailbox.address, is_blind(&mailbox.address));
+            let payload: &[u8] = match self.mode {
+                Mode::Submission => &copy,
+                Mode::Inbound => &raw,
+            };
             if let Err(err) = delivery::store_local(
                 &self.state,
                 mailbox,
                 message::Direction::Inbound,
                 &envelope_from,
                 &mailbox.address,
-                &delivered,
+                payload,
                 &outcome,
             )
             .await
@@ -492,16 +501,42 @@ impl Session {
 
         if !remote.is_empty() {
             let mailbox_id = self.authenticated.as_ref().map(|mailbox| mailbox.id);
-            if let Err(err) = delivery::enqueue_remote(
-                &self.state,
-                mailbox_id,
-                &envelope_from,
-                &remote,
-                &delivered,
-                copy_message_id,
-            )
-            .await
-            {
+            let queued = match self.mode {
+                // A blind recipient is handed its own copy, which names it.
+                Mode::Submission => {
+                    let (blind_remote, visible_remote): (Vec<String>, Vec<String>) =
+                        remote.into_iter().partition(|address| is_blind(address));
+                    delivery::enqueue_send(
+                        &self.state,
+                        mailbox_id,
+                        delivery::Send {
+                            envelope_from: &envelope_from,
+                            raw: &raw,
+                            visible: &visible_remote,
+                            blind: &blind_remote,
+                            not_before: None,
+                            copies: delivery::SendCopies {
+                                copy_message_id,
+                                scheduled_message_id: None,
+                            },
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                }
+                // Inbound mail goes out exactly as it arrived.
+                Mode::Inbound => delivery::enqueue_remote(
+                    &self.state,
+                    mailbox_id,
+                    &envelope_from,
+                    &remote,
+                    &raw,
+                    copy_message_id,
+                )
+                .await
+                .map(|_| ()),
+            };
+            if let Err(err) = queued {
                 warn!(error = %err, "failed to queue an outbound message");
                 failed = true;
             }

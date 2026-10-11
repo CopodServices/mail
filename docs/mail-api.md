@@ -87,7 +87,7 @@ The client's whole reading path is served by the API today:
 | GET | /api/attachment-policy | Attachment limits for the composer |
 | POST | /api/drafts, /api/drafts/{id} | Drafts: create, read, update, discard (forward_of_message_id copies its attachments) |
 | POST | /api/drafts/{id}/attachments, DELETE /api/drafts/{id}/attachments/{index} | Draft attachments |
-| POST | /api/send | Compose and deliver, including cc/bcc and a draft id whose attachments ride along |
+| POST | /api/send | Compose and deliver, including cc/bcc, the reply's conversation headers and a draft id whose attachments ride along |
 | GET/POST | /api/templates, GET/DELETE /api/templates/{id} | Composer templates |
 | GET/PATCH | /api/settings/shortcuts, /api/settings/recipient-addresses | Client preferences |
 | GET | /api/settings/clients | Submission host, port, TLS mode and username for another mail app |

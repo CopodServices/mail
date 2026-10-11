@@ -71,6 +71,9 @@ type SendMessageInput = {
 	html?: string;
 	/** Draft whose stored attachments go out with the message. */
 	draftId?: string | null;
+	/** The message this one answers, and its ancestor chain. */
+	inReplyTo?: string | null;
+	references?: string | null;
 	/** Send no earlier than this time; the message waits in Scheduled until then. */
 	scheduledAt?: string | null;
 };
@@ -92,6 +95,8 @@ export async function sendMessage(input: SendMessageInput): Promise<{
 			text: input.text,
 			html: input.html,
 			draft_id: input.draftId ?? null,
+			in_reply_to: input.inReplyTo ?? null,
+			references_header: input.references ?? null,
 			scheduled_at: input.scheduledAt ?? null,
 		}),
 	});

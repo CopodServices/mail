@@ -407,15 +407,33 @@ pub async fn send_states(
         let Some(copy_message_id) = job.copy_message_id else {
             continue;
         };
-        states.insert(
-            copy_message_id,
-            SendState {
-                state: job_state(&job.status),
-                error: job.last_error,
-            },
-        );
+        // One copy can have several jobs behind it (a blind recipient travels on
+        // its own), so the copy reports the worst of them.
+        let state = job_state(&job.status);
+        let worse = states
+            .get(&copy_message_id)
+            .is_none_or(|current: &SendState| severity(state) > severity(current.state));
+        if worse {
+            states.insert(
+                copy_message_id,
+                SendState {
+                    state,
+                    error: job.last_error,
+                },
+            );
+        }
     }
     Ok(states)
+}
+
+/// How bad a delivery state is, so a copy with several jobs reports the worst.
+fn severity(state: &str) -> u8 {
+    match state {
+        "failed" => 3,
+        "queued" | "sending" => 2,
+        "sent" => 1,
+        _ => 0,
+    }
 }
 
 fn job_state(status: &outbound_job::JobStatus) -> &'static str {

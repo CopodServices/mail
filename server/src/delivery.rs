@@ -6,6 +6,7 @@ use mailcore::forward::{self, already_forwarded};
 use mailcore::policy::AuthOutcome;
 use mailcore::{address, headers, meta, repo, srs, store};
 use sea_orm::Set;
+use std::borrow::Cow;
 use uuid::Uuid;
 
 /// Stores a message in a local mailbox and indexes it in PostgreSQL.
@@ -165,9 +166,11 @@ pub async fn forward_inbound(
     )
     .unwrap_or_else(|| mailbox.address.clone());
 
-    // The message goes out as it arrived, so the sender's DKIM survives; a Bcc
-    // header the arrival leaked is dropped when the copy is queued.
-    let forwarded = forward::mark(raw, &mailbox.address);
+    let marked = forward::mark(raw, &mailbox.address);
+    // The message goes out as it arrived, so the sender's DKIM survives, with a
+    // Bcc header the arrival leaked dropped: no copy that leaves a mailbox may
+    // name a blind recipient.
+    let forwarded = headers::strip_bcc(&marked);
     let job = enqueue_remote(
         state,
         Some(mailbox.id),
@@ -206,6 +209,10 @@ pub async fn enqueue_remote(
 
 /// Queues a message for delivery, optionally not before a given time and linked
 /// to the Scheduled-folder copy that should move to Sent once it goes out.
+///
+/// The bytes are the ones the relay hands to these recipients, so the caller
+/// decides what they may read: enqueue_send writes one copy per set of
+/// recipients, and a forwarded arrival is stripped of its Bcc header first.
 pub async fn enqueue_remote_at(
     state: &AppState,
     mailbox_id: Option<Uuid>,
@@ -218,18 +225,14 @@ pub async fn enqueue_remote_at(
     let id = Uuid::now_v7();
     let now = Utc::now();
     let key = store::outbound_key(&id, now);
-    // The bytes a relay is handed lose the Bcc header: those addresses belong in
-    // the envelope, and the sender's own copy is the one place the header is
-    // kept. Stripping here is what a path that queues a copy cannot forget.
-    let payload = headers::strip_bcc(raw);
 
     state
         .store
-        .put(&key, payload.to_vec())
+        .put(&key, raw.to_vec())
         .await
         .context("failed to write the outgoing message to object storage")?;
 
-    let metadata = meta::extract(&payload);
+    let metadata = meta::extract(raw);
     repo::enqueue_job(
         &state.db,
         outbound_job::ActiveModel {
@@ -252,6 +255,95 @@ pub async fn enqueue_remote_at(
     .await?;
 
     Ok(id)
+}
+
+/// The bytes one mailbox's own copy carries.
+///
+/// A blind recipient's copy names them and nobody else, which is how they learn
+/// they were blind copied; every other copy names no blind recipient at all.
+pub fn recipient_copy<'a>(raw: &'a [u8], address: &str, blind: bool) -> Cow<'a, [u8]> {
+    if blind {
+        Cow::Owned(headers::bcc_for(raw, address))
+    } else {
+        headers::strip_bcc(raw)
+    }
+}
+
+/// One send, as the sender wrote it: the bytes, who may read which copy of them,
+/// and what the queued copies are linked to.
+pub struct Send<'a> {
+    pub envelope_from: &'a str,
+    pub raw: &'a [u8],
+    /// Recipients addressed openly: they travel together.
+    pub visible: &'a [String],
+    /// Recipients blind copied: each travels on a copy that names them alone.
+    pub blind: &'a [String],
+    pub not_before: Option<chrono::DateTime<Utc>>,
+    pub copies: SendCopies,
+}
+
+/// Queues the relay copies of one send, one per set of recipients that may read
+/// the same bytes: the openly addressed recipients travel together on a copy that
+/// names no blind recipient, and each blind recipient travels on a copy that
+/// names them alone.
+///
+/// A scheduled send queues even with nothing to hand over, because the job is
+/// what moves the copy out of the Scheduled folder. Returns how many recipients
+/// were queued.
+pub async fn enqueue_send(
+    state: &AppState,
+    mailbox_id: Option<Uuid>,
+    send: Send<'_>,
+) -> Result<usize> {
+    let Send {
+        envelope_from,
+        raw,
+        visible,
+        blind,
+        not_before,
+        copies,
+    } = send;
+    if !visible.is_empty() {
+        let payload = headers::strip_bcc(raw);
+        enqueue_remote_at(
+            state,
+            mailbox_id,
+            envelope_from,
+            visible,
+            &payload,
+            not_before,
+            copies,
+        )
+        .await?;
+    }
+    for address in blind {
+        let payload = headers::bcc_for(raw, address);
+        enqueue_remote_at(
+            state,
+            mailbox_id,
+            envelope_from,
+            std::slice::from_ref(address),
+            &payload,
+            not_before,
+            copies,
+        )
+        .await?;
+    }
+    if visible.is_empty() && blind.is_empty() && not_before.is_some() {
+        // Nothing to hand over: the job exists so the copy leaves Scheduled.
+        let payload = headers::strip_bcc(raw);
+        enqueue_remote_at(
+            state,
+            mailbox_id,
+            envelope_from,
+            &[],
+            &payload,
+            not_before,
+            copies,
+        )
+        .await?;
+    }
+    Ok(visible.len() + blind.len())
 }
 
 /// The stored copies a queued send is linked to: the one the sender owns, which

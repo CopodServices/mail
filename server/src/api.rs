@@ -13,7 +13,7 @@ use entity::{contact, folder, message, message_flag, outbound_job, setting, temp
 use mailcore::policy::AuthOutcome;
 use mailcore::query;
 use mailcore::{address, repo};
-use mailcore::{body, compose, headers, store};
+use mailcore::{body, compose, store};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
 };
@@ -867,6 +867,13 @@ pub struct SendRequest {
     /// Draft whose stored attachments should go out with this message.
     #[serde(default)]
     pub draft_id: Option<Uuid>,
+    /// The message this one answers, and its ancestor chain. A reply the
+    /// composer has not stored as a draft yet carries them here; a stored draft
+    /// is the fallback, so a client may send either.
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub references_header: Option<String>,
     /// Send no earlier than this time; the message waits in Scheduled until then.
     #[serde(default)]
     pub scheduled_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -3908,6 +3915,24 @@ pub async fn send(
         }
     }
 
+    // A blind recipient is told by their own copy naming them; anyone the sender
+    // named in To or Cc was addressed openly, whoever else was blind copied. The
+    // addresses are compared normalized, the way the mailbox lookup just did.
+    let normalized = |values: &[String]| -> Vec<String> {
+        values
+            .iter()
+            .filter_map(|value| address::parse(&bare_address(value)))
+            .map(|parsed| parsed.normalized())
+            .collect()
+    };
+    let mut named = normalized(&body.to);
+    named.extend(normalized(&body.cc));
+    let blind: Vec<String> = normalized(&body.bcc)
+        .into_iter()
+        .filter(|address| !named.contains(address))
+        .collect();
+    let is_blind = |address: &str| blind.iter().any(|blind| blind == address);
+
     // Attachments the composer stored on the draft ride along with the message.
     let (draft_row, draft_attachments) = match body.draft_id {
         Some(draft_id) => {
@@ -3924,6 +3949,9 @@ pub async fn send(
     };
     let attachment_refs = attachment_refs(&draft_attachments);
 
+    // The Message-ID is ours to build: mail-builder would fall back to the local
+    // hostname, which in a container is the pod name.
+    let composed_message_id = compose::message_id(&state.config.hostname);
     let raw = compose::build(&compose::Compose {
         from: &body.from,
         to: &body.to,
@@ -3933,16 +3961,22 @@ pub async fn send(
         text: body.text.as_deref(),
         html: body.html.as_deref(),
         attachments: &attachment_refs,
-        message_id: None,
-        in_reply_to: None,
-        references: None,
+        message_id: Some(&composed_message_id),
+        // A reply keeps its conversation headers, which is what threads it at the
+        // recipient and in our own conversation view: the request carries them,
+        // and a draft already stored with them is the fallback.
+        in_reply_to: body.in_reply_to.as_deref().or_else(|| {
+            draft_row
+                .as_ref()
+                .and_then(|row| row.in_reply_to.as_deref())
+        }),
+        references: body.references_header.as_deref().or_else(|| {
+            draft_row
+                .as_ref()
+                .and_then(|row| row.references_header.as_deref())
+        }),
     })
     .map_err(internal)?;
-
-    // The Bcc header is the sender's alone. The copy filed in their Sent folder
-    // keeps it; every copy that reaches anybody else is stripped of it first, so
-    // a blind recipient is never named in another mailbox.
-    let delivered = headers::strip_bcc(&raw);
 
     let outcome = AuthOutcome::skipped();
     let scheduled_at = body.scheduled_at.filter(|at| *at > chrono::Utc::now());
@@ -3986,13 +4020,15 @@ pub async fn send(
 
     // A local recipient gets the message in its inbox.
     for mailbox in &local {
+        // Their own copy: a blind recipient is named by it, nobody else is told.
+        let copy = delivery::recipient_copy(&raw, &mailbox.address, is_blind(&mailbox.address));
         delivery::store_local(
             &state,
             mailbox,
             message::Direction::Inbound,
             &sender,
             &mailbox.address,
-            &delivered,
+            &copy,
             &outcome,
         )
         .await
@@ -4000,30 +4036,29 @@ pub async fn send(
         stored += 1;
     }
 
-    let mut queued = 0usize;
-    if scheduled_at.is_some() {
-        // Always queue, even with no remote recipients, so the copy moves.
-        delivery::enqueue_remote_at(
-            &state,
-            None,
-            &sender,
-            &remote,
-            &delivered,
-            scheduled_at,
-            delivery::SendCopies {
+    // The copies that leave the cluster: the openly addressed recipients travel
+    // together on bytes that name no blind recipient, and each blind recipient
+    // travels on a copy that names them alone, which is how they learn they were
+    // blind copied without learning about the others.
+    let (blind_remote, visible_remote): (Vec<String>, Vec<String>) =
+        remote.into_iter().partition(|address| is_blind(address));
+    let queued = delivery::enqueue_send(
+        &state,
+        None,
+        delivery::Send {
+            envelope_from: &sender,
+            raw: &raw,
+            visible: &visible_remote,
+            blind: &blind_remote,
+            not_before: scheduled_at,
+            copies: delivery::SendCopies {
                 copy_message_id,
                 scheduled_message_id: scheduled_copy,
             },
-        )
-        .await
-        .map_err(internal)?;
-        queued = remote.len();
-    } else if !remote.is_empty() {
-        delivery::enqueue_remote(&state, None, &sender, &remote, &delivered, copy_message_id)
-            .await
-            .map_err(internal)?;
-        queued = remote.len();
-    }
+        },
+    )
+    .await
+    .map_err(internal)?;
 
     // The draft has become the sent message, so it leaves the drafts folder.
     if let Some(draft) = draft_row {

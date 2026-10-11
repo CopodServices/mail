@@ -149,7 +149,7 @@ examples below run.
 | GET/PATCH/DELETE | /api/drafts/{id} | Read, update or discard a draft |
 | POST | /api/drafts/{id}/attachments | Upload attachments (multipart) |
 | DELETE | /api/drafts/{id}/attachments/{index} | Remove an attachment |
-| POST | /api/send | Compose and deliver ({from, to, cc, bcc, subject, text, html, draft_id, scheduled_at}) |
+| POST | /api/send | Compose and deliver ({from, to, cc, bcc, subject, text, html, draft_id, in_reply_to, references_header, scheduled_at}) |
 
 Reader state (read, starred, folder) lives in its own table, message_flags, so
 the MTA's stored messages stay immutable.

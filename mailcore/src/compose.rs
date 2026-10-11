@@ -69,6 +69,18 @@ pub struct Compose<'a> {
     pub references: Option<&'a str>,
 }
 
+/// A Message-ID for a message this service composes.
+///
+/// mail-builder would build one from the local hostname, which in a container is
+/// the pod name: it is not a domain, it says where the mail was composed, and it
+/// changes with every rollout. The configured hostname is what belongs there.
+///
+/// The value is bare, the way mail-builder and the parser both want it: the
+/// builder wraps the header in the angle brackets itself.
+pub fn message_id(hostname: &str) -> String {
+    format!("{}@{}", uuid::Uuid::now_v7(), hostname)
+}
+
 /// Builds a message with recipients, threading headers and attachments.
 pub fn build(message: &Compose<'_>) -> Result<Vec<u8>> {
     let mut builder = mail_builder::MessageBuilder::new()
@@ -115,6 +127,14 @@ pub fn build(message: &Compose<'_>) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_composed_message_ids_itself_on_the_configured_hostname() {
+        let id = message_id("mx.example.test");
+        assert!(id.ends_with("@mx.example.test"), "{id}");
+        assert!(!id.contains('<'), "mail-builder adds the brackets: {id}");
+        assert_ne!(id, message_id("mx.example.test"), "two messages, two ids");
+    }
 
     #[test]
     fn keeps_a_display_name_in_the_from_header() {
@@ -177,14 +197,16 @@ mod tests {
                 content_type: "text/plain",
                 bytes: b"hi",
             }],
-            message_id: Some("<id@example.test>"),
-            in_reply_to: Some("<root@example.test>"),
-            references: Some("<root@example.test>"),
+            message_id: Some("id@example.test"),
+            in_reply_to: Some("root@example.test"),
+            references: Some("root@example.test"),
         })
         .unwrap();
         let text = String::from_utf8_lossy(&raw);
         assert!(text.contains("Cc:"), "{text}");
-        assert!(text.contains("In-Reply-To:"), "{text}");
+        assert!(text.contains("Message-ID: <id@example.test>"), "{text}");
+        assert!(text.contains("In-Reply-To: <root@example.test>"), "{text}");
+        assert!(text.contains("References: <root@example.test>"), "{text}");
         assert!(text.contains("note.txt"), "{text}");
 
         // The stored message round-trips through the body parser.

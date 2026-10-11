@@ -403,6 +403,8 @@ export function ComposeForm({
 				text: htmlToPlainText(fullHtml),
 				html: fullHtml,
 				draftId: attachedDraftId,
+				inReplyTo: threading?.inReplyTo ?? null,
+				references: threading?.references ?? null,
 				scheduledAt: scheduledAt?.toISOString() ?? null,
 			});
 			wasScheduled = outcome.scheduled === true;

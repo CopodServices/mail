@@ -25,6 +25,32 @@ pub struct Body {
     pub unsubscribe_url: Option<String>,
 }
 
+/// The addresses a message was blind copied to: what its Bcc header names and its
+/// To and Cc headers do not.
+///
+/// An address a visible header also names was addressed openly, whoever else was
+/// blind copied, so it is not one of these.
+pub fn blind_recipients(raw: &[u8]) -> Vec<String> {
+    let Some(parsed) = mail_parser::MessageParser::default().parse(raw) else {
+        return Vec::new();
+    };
+    let normalized = |value: Option<&mail_parser::Address<'_>>| -> Vec<String> {
+        value
+            .into_iter()
+            .flat_map(|addresses| addresses.iter())
+            .filter_map(|entry| entry.address())
+            .filter_map(crate::address::parse)
+            .map(|parsed| parsed.normalized())
+            .collect()
+    };
+    let mut named = normalized(parsed.to());
+    named.extend(normalized(parsed.cc()));
+    normalized(parsed.bcc())
+        .into_iter()
+        .filter(|address| !named.contains(address))
+        .collect()
+}
+
 /// Parses the raw message with mail-parser and returns its readable parts.
 pub fn extract(raw: &[u8]) -> Body {
     let Some(parsed) = mail_parser::MessageParser::default().parse(raw) else {
@@ -90,6 +116,24 @@ fn address_list(value: Option<&mail_parser::Address<'_>>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blind_recipients_are_what_no_visible_header_names() {
+        let raw = concat!(
+            "From: alice@example.test\r\n",
+            "To: Bob <bob@example.test>, carol@example.test\r\n",
+            "Cc: dave@example.test\r\n",
+            "Bcc: carol@example.test, Eve <eve@example.test>\r\n",
+            "\r\n",
+            "body",
+        )
+        .as_bytes();
+        assert_eq!(
+            blind_recipients(raw),
+            vec!["eve@example.test".to_string()],
+            "carol was addressed openly, so she is not a blind recipient"
+        );
+    }
 
     #[test]
     fn extracts_text_and_attachment() {
