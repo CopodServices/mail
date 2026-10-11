@@ -50,8 +50,9 @@ flowchart LR
   status quarantined. A mailbox at its `quota_bytes` limit refuses the message
   with a temporary 451 and stores nothing, so the sender retries later. A
   mailbox with an auto-forward address queues a copy of every arrival to it,
-  sent as the mailbox itself with the original sender on Reply-To, because the
-  relay refuses a forward whose From domain it has not verified.
+  with only the envelope sender rewritten (SRS), so the forwarded message keeps
+  its own authentication; a relay that refuses the sender's domain gets the copy
+  rewritten to go out as the mailbox.
 - **Submission (:2587 locally, :587 in production)** — requires AUTH (PLAIN or
   LOGIN, argon2 password hashes) and the envelope sender must match the
   authenticated mailbox. Mail to a local mailbox is stored; anything else is

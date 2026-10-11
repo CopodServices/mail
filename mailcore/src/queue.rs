@@ -4,7 +4,7 @@ use crate::store::MailStore;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use entity::outbound_job::JobStatus;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,21 +56,31 @@ impl Queue {
                 }
             }
             Err(err) => {
-                job.attempts += 1;
-                job.last_error = Some(err.to_string());
-                let permanent = err
-                    .downcast_ref::<crate::relay::SmtpRejection>()
-                    .is_some_and(|rejection| rejection.permanent);
-                if permanent {
-                    job.status = JobStatus::Failed;
-                    tracing::error!(id = %job.id, error = %err, "outbound message rejected");
-                } else if job.attempts >= self.max_attempts {
-                    job.status = JobStatus::Failed;
-                    tracing::error!(id = %job.id, error = %err, "giving up on outbound message");
-                } else {
+                // A forward the relay refused over the sender's domain is sent
+                // again as the mailbox, which the SMTP user may always send from.
+                if let Some(envelope) = self.rewrite_refused_forward(&job, &err).await {
+                    job.envelope_from = envelope;
+                    job.attempts = 0;
+                    job.last_error = Some(err.to_string());
+                    job.next_attempt_at = Utc::now();
                     job.status = JobStatus::Pending;
-                    job.next_attempt_at = Utc::now() + backoff(job.attempts);
-                    tracing::warn!(id = %job.id, attempt = job.attempts, error = %err, "outbound attempt failed");
+                } else {
+                    job.attempts += 1;
+                    job.last_error = Some(err.to_string());
+                    let permanent = err
+                        .downcast_ref::<crate::relay::SmtpRejection>()
+                        .is_some_and(|rejection| rejection.permanent);
+                    if permanent {
+                        job.status = JobStatus::Failed;
+                        tracing::error!(id = %job.id, error = %err, "outbound message rejected");
+                    } else if job.attempts >= self.max_attempts {
+                        job.status = JobStatus::Failed;
+                        tracing::error!(id = %job.id, error = %err, "giving up on outbound message");
+                    } else {
+                        job.status = JobStatus::Pending;
+                        job.next_attempt_at = Utc::now() + backoff(job.attempts);
+                        tracing::warn!(id = %job.id, attempt = job.attempts, error = %err, "outbound attempt failed");
+                    }
                 }
             }
         }
@@ -87,6 +97,45 @@ impl Queue {
         {
             tracing::error!(error = %err, "failed to record queue job state");
         }
+    }
+
+    /// Rewrites and re-queues a forward the relay refused over its sender domain:
+    /// the copy goes out again as the mailbox itself. Returns the envelope sender
+    /// to retry with, or None when this refusal is something else.
+    async fn rewrite_refused_forward(
+        &self,
+        job: &entity::outbound_job::Model,
+        err: &anyhow::Error,
+    ) -> Option<String> {
+        let rejection = err.downcast_ref::<crate::relay::SmtpRejection>()?;
+        if !rejection.permanent || !crate::forward::sender_domain_refused(&rejection.message) {
+            return None;
+        }
+        let mailbox = entity::mailbox::Entity::find_by_id(job.mailbox_id?)
+            .one(&self.db)
+            .await
+            .ok()??;
+        // An envelope already on the mailbox is the retry of a rewrite, not a
+        // forward that still has to be rewritten.
+        if job.envelope_from.eq_ignore_ascii_case(&mailbox.address) {
+            return None;
+        }
+        let payload = self.store.get(&job.storage_key).await.ok()?;
+        if !crate::forward::already_forwarded(&payload) {
+            return None;
+        }
+        let rewritten = crate::forward::rewrite_sender(
+            &payload,
+            &mailbox.address,
+            mailbox.display_name.as_deref(),
+        );
+        self.store.put(&job.storage_key, rewritten).await.ok()?;
+        tracing::warn!(
+            id = %job.id,
+            mailbox = %mailbox.address,
+            "the relay refused the sender's domain; resending the forward as the mailbox"
+        );
+        Some(mailbox.address)
     }
 
     async fn deliver(&self, job: &entity::outbound_job::Model) -> Result<()> {

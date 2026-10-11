@@ -118,15 +118,19 @@ video, plain text, CSV or JSON) is served inline; every other type, including
 HTML, SVG and XML, stays a download so a preview URL can never run script in the
 mail origin. Without the query the part always downloads.
 
-A mailbox may carry one auto-forward address (forward_to). A copy of each
-message delivered to that mailbox is queued to the address. The relay refuses a
-message whose From domain it has not verified, so the copy goes out as the
-mailbox itself: the mailbox address becomes the From, the original sender moves
-to Reply-To, and the Received chain and the signatures taken over the old sender
-are dropped, because they no longer describe the message. The body is copied
-through unchanged. The copy also carries an X-Copod-Auto-Forwarded header, so a
-forward that loops back is delivered but never forwarded again, and forwarding
-to the mailbox's own address is ignored.
+A mailbox may carry one auto-forward address (forward_to). A copy of each message
+delivered to that mailbox is queued to the address. The message goes out exactly
+as it arrived, so its own DKIM signature still authenticates it at the
+destination, and only the envelope sender is rewritten: the original sender is
+encoded with Sender Rewriting Scheme on the mailbox's own domain
+(SRS0=<hash>=<days>=<sender-domain>=<sender-local>, hashed with a key derived
+from the session secret and valid for three weeks), which is what the relay asks
+of forwarded mail. The copy carries an X-Copod-Auto-Forwarded header, so a copy
+that loops back is delivered but never forwarded again, and forwarding to the
+mailbox's own address is ignored. A relay that refuses the sender's domain,
+because its SMTP user may not send from arbitrary domains, is answered by the
+queue: it rewrites the copy to go out as the mailbox with the original sender on
+Reply-To, drops the traces over the old sender, and retries it once.
 
 A draft is an ordinary message row whose reader flag puts it in the drafts
 folder, with the composed message in object storage, so the drafts list, counts

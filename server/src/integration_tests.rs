@@ -991,29 +991,34 @@ async fn auto_forwards_an_arriving_message_once() {
     let recipients: Vec<String> = serde_json::from_value(job.recipients.clone()).unwrap();
     assert_eq!(recipients, vec!["dest@remote.test".to_string()]);
 
-    // The relay refuses a From domain it has not verified, so the copy goes out
-    // as the mailbox with the original sender left reachable on Reply-To.
-    assert_eq!(job.envelope_from, address);
+    // The envelope sender is rewritten with SRS, which is what the relay asks of
+    // forwarded mail, and it decodes back to the sender a bounce belongs to.
+    let (local_part, srs_domain) = job
+        .envelope_from
+        .split_once('@')
+        .expect("a rewritten envelope sender");
+    assert_eq!(srs_domain, domain);
+    let key = mailcore::srs::key(&config.session_secret);
+    assert_eq!(
+        mailcore::srs::decode(local_part, srs_domain, &key, chrono::Utc::now().timestamp())
+            .as_deref(),
+        Some("sender@remote.test")
+    );
+
+    // The message itself goes out untouched, so its own DKIM signature survives;
+    // the marker is what stops a copy that loops back from being sent on again.
     let payload = store
         .get(&job.storage_key)
         .await
         .expect("forwarded payload");
     let text = String::from_utf8_lossy(&payload);
     assert!(
-        text.contains("X-Copod-Auto-Forwarded:"),
-        "the copy is marked so it cannot loop"
+        text.starts_with("X-Copod-Auto-Forwarded: "),
+        "the copy is marked so it cannot loop: {text}"
     );
     assert!(
-        text.contains(&format!("\r\nFrom: {address}\r\n")),
-        "the copy is sent as the mailbox: {text}"
-    );
-    assert!(
-        text.contains("Reply-To: sender@remote.test"),
-        "the original sender is still reachable: {text}"
-    );
-    assert!(
-        !text.contains("From: sender@remote.test"),
-        "the old sender is not the From the relay sees: {text}"
+        text.contains("From: sender@remote.test"),
+        "the forwarded message keeps its own headers: {text}"
     );
     assert!(text.contains("body line"));
 
