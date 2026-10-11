@@ -158,9 +158,10 @@ export async function fetchMailboxStorage(): Promise<MailboxStorage[]> {
 }
 
 /**
- * The submission settings another mail app connects with. The host, port and
- * TLS mode come from the server's own configuration, so a self-hosted instance
- * never shows a hard-coded port.
+ * The settings another mail app connects with, to send and, when the server
+ * offers them, to read over IMAP or POP3. The host, port and TLS mode come from
+ * the server's own configuration, so a self-hosted instance never shows a
+ * hard-coded port.
  */
 export async function fetchClientConnection(): Promise<ClientConnection> {
 	const response = await apiFetch("/api/settings/clients");
@@ -172,6 +173,13 @@ export async function fetchClientConnection(): Promise<ClientConnection> {
 			smtp_security?: string;
 			username?: string | null;
 			imap_supported?: boolean;
+			imap_host?: string;
+			imap_port?: number;
+			imap_security?: string;
+			pop3_supported?: boolean;
+			pop3_host?: string;
+			pop3_port?: number;
+			pop3_security?: string;
 		};
 	};
 	if (!body.data?.smtp_host)
@@ -182,6 +190,13 @@ export async function fetchClientConnection(): Promise<ClientConnection> {
 		smtpSecurity: body.data.smtp_security === "starttls" ? "starttls" : "none",
 		username: body.data.username ?? null,
 		imapSupported: body.data.imap_supported ?? false,
+		imapHost: body.data.imap_host ?? "",
+		imapPort: body.data.imap_port ?? 993,
+		imapSecurity: body.data.imap_security === "tls" ? "tls" : "none",
+		pop3Supported: body.data.pop3_supported ?? false,
+		pop3Host: body.data.pop3_host ?? "",
+		pop3Port: body.data.pop3_port ?? 995,
+		pop3Security: body.data.pop3_security === "tls" ? "tls" : "none",
 	};
 }
 

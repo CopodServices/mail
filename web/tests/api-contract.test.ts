@@ -99,6 +99,24 @@ describe.skipIf(!base)("the web client against the live API", () => {
 		expect(later.scheduled).toBe(true);
 	});
 
+	// The reader endpoints are reported whether or not the server answers them,
+	// so the settings page can show a real host and port instead of guessing.
+	test("reports the reader endpoints beside the submission settings", async () => {
+		const connection = await api.fetchClientConnection();
+		expect(connection.smtpHost.length).toBeGreaterThan(0);
+		// The ports come from the server's own listener addresses; a test
+		// instance bound to an ephemeral port reports that address faithfully.
+		expect(connection.smtpPort).toBeGreaterThanOrEqual(0);
+		expect(typeof connection.imapSupported).toBe("boolean");
+		expect(connection.imapPort).toBeGreaterThanOrEqual(0);
+		expect(connection.imapPort).toBeLessThanOrEqual(65535);
+		expect(["tls", "none"]).toContain(connection.imapSecurity);
+		expect(typeof connection.pop3Supported).toBe("boolean");
+		expect(connection.pop3Port).toBeGreaterThanOrEqual(0);
+		expect(connection.pop3Port).toBeLessThanOrEqual(65535);
+		expect(["tls", "none"]).toContain(connection.pop3Security);
+	});
+
 	test("a mailbox signature reaches the mailbox the composer reads", async () => {
 		const { fetchMailboxOptions } = await import(
 			"@/components/mailbox-provider-utils"

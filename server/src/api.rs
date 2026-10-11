@@ -15,7 +15,8 @@ use mailcore::query;
 use mailcore::{address, repo};
 use mailcore::{body, compose, store};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, NotSet, QueryFilter,
+    QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::{OpenApi, ToSchema};
@@ -1159,6 +1160,8 @@ async fn upsert_flag(
         starred: Set(starred
             .or(existing.as_ref().map(|flag| flag.starred))
             .unwrap_or(false)),
+        answered: Set(existing.as_ref().map(|flag| flag.answered).unwrap_or(false)),
+        deleted: Set(existing.as_ref().map(|flag| flag.deleted).unwrap_or(false)),
         folder: Set(folder
             .or_else(|| existing.as_ref().map(|flag| flag.folder.clone()))
             .unwrap_or_else(|| "inbox".to_string())),
@@ -1566,6 +1569,8 @@ async fn set_snooze(
         message_id: Set(id),
         read: Set(existing.as_ref().map(|flag| flag.read).unwrap_or(false)),
         starred: Set(existing.as_ref().map(|flag| flag.starred).unwrap_or(false)),
+        answered: Set(existing.as_ref().map(|flag| flag.answered).unwrap_or(false)),
+        deleted: Set(existing.as_ref().map(|flag| flag.deleted).unwrap_or(false)),
         folder: Set(existing
             .as_ref()
             .map(|flag| flag.folder.clone())
@@ -2533,6 +2538,8 @@ pub async fn create_draft(
         &state.db,
         message::ActiveModel {
             id: Set(id),
+            // The sequence hands the new row its uid.
+            uid: NotSet,
             mailbox_id: Set(mailbox_id),
             direction: Set(message::Direction::Outbound),
             status: Set(message::Status::Stored),
@@ -3065,8 +3072,8 @@ pub async fn update_recipient_addresses_setting(
     .into_response())
 }
 
-/// The settings another mail app needs to send as this mailbox. Reading mail
-/// from a third-party client is not offered, so imap_supported is always false.
+/// The settings another mail app needs to send as this mailbox and, when the
+/// readers are configured, to read it over IMAP or POP3.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ClientConnectionResponse {
     /// Submission host a mail app connects to.
@@ -3077,8 +3084,22 @@ pub struct ClientConnectionResponse {
     pub smtp_security: String,
     /// Address to authenticate as; absent for the operator, who manages every mailbox.
     pub username: Option<String>,
-    /// Reading mail from a third-party client is not supported yet.
+    /// True when this instance answers IMAP.
     pub imap_supported: bool,
+    /// IMAP host a mail app connects to.
+    pub imap_host: String,
+    /// IMAP port on that host.
+    pub imap_port: u16,
+    /// "tls" when the IMAP listener is encrypted, otherwise "none".
+    pub imap_security: String,
+    /// True when this instance answers POP3.
+    pub pop3_supported: bool,
+    /// POP3 host a mail app connects to.
+    pub pop3_host: String,
+    /// POP3 port on that host.
+    pub pop3_port: u16,
+    /// "tls" when the POP3 listener is encrypted, otherwise "none".
+    pub pop3_security: String,
 }
 
 /// The port the submission listener is bound to, read from its configured
@@ -3106,13 +3127,37 @@ pub async fn get_client_connection(
     } else {
         "none"
     };
+    let reader_security = if state.config.starttls_enabled() {
+        "tls"
+    } else {
+        "none"
+    };
+    let imap_port = state
+        .config
+        .imap_listen
+        .as_deref()
+        .map(|listen| mailcore::config::listen_port(listen, 993))
+        .unwrap_or(993);
+    let pop3_port = state
+        .config
+        .pop3_listen
+        .as_deref()
+        .map(|listen| mailcore::config::listen_port(listen, 995))
+        .unwrap_or(995);
     Ok(Json(DataResponse {
         data: ClientConnectionResponse {
             smtp_host: state.config.hostname.clone(),
             smtp_port: submission_port(&state.config.submission_listen),
             smtp_security: smtp_security.to_string(),
             username: principal.scope().map(|scope| scope.address.clone()),
-            imap_supported: false,
+            imap_supported: state.config.imap_enabled(),
+            imap_host: state.config.hostname.clone(),
+            imap_port,
+            imap_security: reader_security.to_string(),
+            pop3_supported: state.config.pop3_enabled(),
+            pop3_host: state.config.hostname.clone(),
+            pop3_port,
+            pop3_security: reader_security.to_string(),
         },
     })
     .into_response())

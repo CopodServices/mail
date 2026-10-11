@@ -12,6 +12,10 @@ pub struct Model {
     pub message_id: Uuid,
     pub read: bool,
     pub starred: bool,
+    /// Set by an IMAP client with \Answered.
+    pub answered: bool,
+    /// Marked \Deleted; the row goes when the client expunges.
+    pub deleted: bool,
     /// inbox, sent, spam, trash, archived, snoozed, scheduled, or a folder id.
     pub folder: String,
     /// While this is in the future the message shows in Snoozed, not its folder.

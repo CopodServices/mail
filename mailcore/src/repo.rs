@@ -4,7 +4,7 @@ use entity::{domain, mailbox, message, outbound_job};
 use sea_orm::sea_query::{Alias, Expr};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, ExprTrait,
-    FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    FromQueryResult, NotSet, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -224,6 +224,8 @@ pub async fn create_mailbox(
         domain_id: Set(parent.id),
         local_part: Set(parsed.local_part),
         password_hash: Set(crate::auth::hash_password(password)?),
+        // The column default mints a fresh UIDVALIDITY for the new mailbox.
+        uid_validity: NotSet,
         signature: Set(None),
         display_name: Set(None),
         forward_to: Set(None),
@@ -330,6 +332,8 @@ pub async fn set_message_folder(
         message_id: Set(message_id),
         read: Set(existing.as_ref().map(|flag| flag.read).unwrap_or(true)),
         starred: Set(existing.as_ref().map(|flag| flag.starred).unwrap_or(false)),
+        answered: Set(existing.as_ref().map(|flag| flag.answered).unwrap_or(false)),
+        deleted: Set(existing.as_ref().map(|flag| flag.deleted).unwrap_or(false)),
         folder: Set(folder.to_string()),
         snoozed_until: Set(existing.as_ref().and_then(|flag| flag.snoozed_until)),
         updated_at: Set(Utc::now()),
@@ -340,6 +344,58 @@ pub async fn set_message_folder(
         model.insert(db).await?;
     }
     Ok(())
+}
+
+/// The reader-state changes a client asks for; None leaves one alone.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FlagUpdate {
+    pub read: Option<bool>,
+    pub starred: Option<bool>,
+    pub answered: Option<bool>,
+    pub deleted: Option<bool>,
+}
+
+/// Applies reader-state changes to one message, creating its flag row when it
+/// has none yet. The folder default is inbox, which the readers treat as "not
+/// moved", so the direction still decides where a sent copy shows.
+pub async fn update_flags(
+    db: &DatabaseConnection,
+    message_id: Uuid,
+    update: FlagUpdate,
+) -> Result<entity::message_flag::Model> {
+    let existing = entity::message_flag::Entity::find_by_id(message_id)
+        .one(db)
+        .await?;
+    let model = entity::message_flag::ActiveModel {
+        message_id: Set(message_id),
+        read: Set(update
+            .read
+            .or(existing.as_ref().map(|flag| flag.read))
+            .unwrap_or(false)),
+        starred: Set(update
+            .starred
+            .or(existing.as_ref().map(|flag| flag.starred))
+            .unwrap_or(false)),
+        answered: Set(update
+            .answered
+            .or(existing.as_ref().map(|flag| flag.answered))
+            .unwrap_or(false)),
+        deleted: Set(update
+            .deleted
+            .or(existing.as_ref().map(|flag| flag.deleted))
+            .unwrap_or(false)),
+        folder: Set(existing
+            .as_ref()
+            .map(|flag| flag.folder.clone())
+            .unwrap_or_else(|| "inbox".to_string())),
+        snoozed_until: Set(existing.as_ref().and_then(|flag| flag.snoozed_until)),
+        updated_at: Set(Utc::now()),
+    };
+    if existing.is_some() {
+        Ok(model.update(db).await?)
+    } else {
+        Ok(model.insert(db).await?)
+    }
 }
 
 pub async fn enqueue_job(

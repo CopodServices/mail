@@ -64,6 +64,11 @@ flowchart LR
   backoff (capped at six hours). A permanent 5xx rejection (bad SPF/DKIM/MX, an
   unapproved sending domain, bad credentials, rate limits) fails the job at once
   and is recorded in outbound_jobs.last_error.
+- **Readers (opt-in)** — with IMAP_LISTEN or POP3_LISTEN set, a mailbox is also
+  readable from another mail app. IMAP serves the folders, FETCH, SEARCH, flags,
+  MOVE/COPY, APPEND and IDLE; POP3 serves the inbox as a drop with UIDL, TOP and
+  delete on QUIT. Both are implicit TLS whenever a certificate is configured, and
+  the settings page lists the endpoints this instance actually answers.
 
 ## Components
 
@@ -139,7 +144,7 @@ examples below run.
 | GET | /api/attachment-policy | Attachment limits for the composer |
 | GET/POST | /api/templates, GET/DELETE /api/templates/{id} | Composer templates |
 | GET/PATCH | /api/settings/shortcuts, /api/settings/recipient-addresses | Client preferences |
-| GET | /api/settings/clients | Submission host, port, TLS mode and username for another mail app |
+| GET | /api/settings/clients | Submission host, port, TLS mode and username, plus the IMAP and POP3 endpoints this instance answers |
 | GET | /api/contacts | A contact for an address |
 | PATCH | /api/contacts | Rename a contact |
 | POST | /api/contacts/block | Block a sender |
@@ -163,6 +168,7 @@ the MTA's stored messages stay immutable.
 | SESSION_COOKIE_SECURE | Marks the session cookie Secure (default true) |
 | API_KEY | Operator bearer token: manages every tenant (empty disables auth) |
 | SMTP_LISTEN / SUBMISSION_LISTEN | Listener addresses (0.0.0.0:2525 / :2587) |
+| IMAP_LISTEN / POP3_LISTEN | Reader listener addresses; unset leaves that reader out entirely (0.0.0.0:993 / :995 in production, :1993 / :1995 locally) |
 | MAIL_HOSTNAME | EHLO name of this server |
 | MAIL_DOMAINS | Domains to accept mail for |
 | MAIL_BOOTSTRAP_PASSWORD | Optional password for the seeded postmaster mailbox |
@@ -257,6 +263,38 @@ domain on the SMTP user, or enable allow-any-domain and rely on SPF alone.
 To move to another provider, change the RELAY_* values, create the equivalent
 SMTP credential there, and publish that provider's authentication records for
 each domain. Nothing else in the service changes.
+
+## Reading mail in another app
+
+The web client is not the only reader. Point another mail app at the same
+mailbox address and password, and it reads the same folders, flags and storage
+the web client does. Two listeners carry that, both opt-in:
+
+| Listener | Default port | What it serves |
+| --- | --- | --- |
+| IMAP | 993 (implicit TLS) | INBOX, Sent, Drafts, Trash, Junk, Archive and custom folders; FETCH, SEARCH, STORE, COPY, MOVE, EXPUNGE, APPEND and IDLE |
+| POP3 | 995 (implicit TLS) | the inbox as one drop, with UIDL, TOP, and delete applied at QUIT |
+
+Set IMAP_LISTEN and/or POP3_LISTEN to bind them; an instance that sets neither
+answers neither, and GET /api/settings/clients reports imap_supported and
+pop3_supported as false so the settings page says so rather than showing a dead
+endpoint. There is no STARTTLS and no STLS: with TLS_CERT_PATH and TLS_KEY_PATH
+set the listener is implicit TLS from the first byte, and without them it serves
+plaintext, which is only for local development.
+
+An IMAP client can set \Seen, \Flagged, \Answered and \Deleted; \Deleted goes
+when the client expunges, which removes the row and its stored object. A client
+that saves its own copy of a sent message with APPEND is answered with the copy
+the send path already filed, matched on Message-ID, so no duplicate appears. POP3
+has no flag command, so a retrieved message is marked read, and the drop's
+exclusive lock refuses a second concurrent session with [IN-USE].
+
+A client is configured with the hostname this service reports (MAIL_HOSTNAME),
+the port from the listener above, and the mailbox address as the username. The
+password is the mailbox password. Publishing 993/995 needs those ports reachable
+from the client's network; the Cloudflare Tunnel used by the other services can
+carry them as TCP, unlike port 25, but that is a deployment choice rather than
+something this service configures.
 
 ## Layout
 

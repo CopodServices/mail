@@ -1,6 +1,8 @@
 mod api;
 mod bootstrap;
 mod delivery;
+mod imap;
+mod pop3;
 mod session;
 mod smtp;
 mod state;
@@ -103,6 +105,27 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
         smtp::Mode::Submission,
     ));
+
+    // The readers are opt-in, so an instance that does not set them behaves
+    // exactly as it did before they existed.
+    if let Some(listen) = config.imap_listen.clone() {
+        let listener = TcpListener::bind(&listen)
+            .await
+            .with_context(|| format!("failed to bind the IMAP listener at {listen}"))?;
+        if config.tls.is_none() {
+            warn!(listen = %listen, "IMAP is serving plaintext; configure TLS to encrypt it");
+        }
+        tokio::spawn(imap::serve(listener, state.clone()));
+    }
+    if let Some(listen) = config.pop3_listen.clone() {
+        let listener = TcpListener::bind(&listen)
+            .await
+            .with_context(|| format!("failed to bind the POP3 listener at {listen}"))?;
+        if config.tls.is_none() {
+            warn!(listen = %listen, "POP3 is serving plaintext; configure TLS to encrypt it");
+        }
+        tokio::spawn(pop3::serve(listener, state.clone()));
+    }
 
     let app = api::router(state);
     let address = format!("0.0.0.0:{}", config.server_port);

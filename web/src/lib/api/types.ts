@@ -53,11 +53,18 @@ export type MailboxStorage = {
 	quotaBytes: number;
 };
 
-/** How another mail app connects to send as this mailbox, from GET /api/settings/clients. */
+/** How another mail app connects to this mailbox, from GET /api/settings/clients. */
 export type ClientConnection = {
 	smtpHost: string;
 	smtpPort: number;
 	smtpSecurity: "starttls" | "none";
 	username: string | null;
 	imapSupported: boolean;
+	imapHost: string;
+	imapPort: number;
+	imapSecurity: "tls" | "none";
+	pop3Supported: boolean;
+	pop3Host: string;
+	pop3Port: number;
+	pop3Security: "tls" | "none";
 };

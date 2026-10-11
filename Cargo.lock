@@ -3296,6 +3296,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken",
  "mail-auth",
+ "mail-parser",
  "mailcore",
  "migration",
  "rand 0.8.8",

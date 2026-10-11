@@ -91,7 +91,7 @@ The client's whole reading path is served by the API today:
 | POST | /api/send | Compose and deliver, including cc/bcc, the reply's conversation headers and a draft id whose attachments ride along |
 | GET/POST | /api/templates, GET/DELETE /api/templates/{id} | Composer templates |
 | GET/PATCH | /api/settings/shortcuts, /api/settings/recipient-addresses | Client preferences |
-| GET | /api/settings/clients | Submission host, port, TLS mode and username for another mail app |
+| GET | /api/settings/clients | Submission host, port, TLS mode and username, plus the IMAP and POP3 endpoints this instance answers |
 | GET/PATCH | /api/contacts | Read or rename a contact |
 | POST | /api/contacts/block | Block a sender |
 | GET/POST/DELETE | /api/contacts/avatar | Contact picture, full or preview |

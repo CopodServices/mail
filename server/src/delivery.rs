@@ -5,7 +5,7 @@ use entity::{mailbox, message, outbound_job};
 use mailcore::forward::{self, already_forwarded};
 use mailcore::policy::AuthOutcome;
 use mailcore::{address, headers, meta, repo, srs, store};
-use sea_orm::Set;
+use sea_orm::{NotSet, Set};
 use std::borrow::Cow;
 use uuid::Uuid;
 
@@ -67,6 +67,8 @@ pub async fn store_local(
         &state.db,
         message::ActiveModel {
             id: Set(id),
+            // The sequence hands the new row its uid.
+            uid: NotSet,
             mailbox_id: Set(Some(mailbox.id)),
             direction: Set(direction),
             status: Set(status),

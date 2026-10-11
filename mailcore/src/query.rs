@@ -11,11 +11,11 @@ use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
-use entity::outbound_job;
+use entity::{message, outbound_job};
 use sea_orm::sea_query::Value;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, Statement,
+    QueryOrder, QuerySelect, Statement,
 };
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
@@ -630,6 +630,117 @@ pub async fn send_states(
         }
     }
     Ok(states)
+}
+
+/// One stored message as an IMAP or POP3 reader sees it.
+///
+/// The readers number a mailbox's messages by uid, so this carries the reader
+/// state plus the metadata a FETCH, STAT or LIST answers from, never the bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FolderEntry {
+    pub id: Uuid,
+    pub uid: i64,
+    pub read: bool,
+    pub starred: bool,
+    pub answered: bool,
+    pub deleted: bool,
+    pub size_bytes: i64,
+    pub received_at: DateTime<Utc>,
+    pub subject: Option<String>,
+    pub header_from: Option<String>,
+    pub message_id: Option<String>,
+    pub envelope_from: String,
+    pub envelope_to: String,
+    pub in_reply_to: Option<String>,
+    pub storage_key: String,
+    pub direction: String,
+    pub status: String,
+}
+
+/// The messages in one mailbox's folders, oldest uid first.
+///
+/// This is the reader's view of a folder: the readers resolve sequence numbers,
+/// answer STATUS from it and run SEARCH over it, so it stays one query per
+/// command and never touches the stored bytes.
+pub async fn folder_entries(
+    db: &DatabaseConnection,
+    mailbox_id: Uuid,
+    folders: &[&str],
+) -> Result<Vec<FolderEntry>> {
+    if folders.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut sql = String::from(
+        "SELECT m.id AS id, m.uid AS uid, \
+         COALESCE(f.read, false) AS read, COALESCE(f.starred, false) AS starred, \
+         COALESCE(f.answered, false) AS answered, COALESCE(f.deleted, false) AS deleted, \
+         m.size_bytes AS size_bytes, m.received_at AS received_at, \
+         m.subject AS subject, m.header_from AS header_from, m.message_id AS message_id, \
+         m.envelope_from AS envelope_from, m.envelope_to AS envelope_to, \
+         m.in_reply_to AS in_reply_to, m.storage_key AS storage_key, \
+         m.direction AS direction, m.status AS status ",
+    );
+    sql.push_str(MESSAGE_FROM);
+    let mut values: Vec<Value> = vec![mailbox_id.into()];
+    sql.push_str(" WHERE m.mailbox_id = $1 AND (");
+    sql.push_str(FOLDER_SQL);
+    sql.push_str(") IN (");
+    for (index, folder) in folders.iter().enumerate() {
+        if index > 0 {
+            sql.push(',');
+        }
+        values.push(folder.to_string().into());
+        sql.push('$');
+        sql.push_str(&(index + 2).to_string());
+    }
+    sql.push_str(") ORDER BY m.uid ASC");
+
+    let rows = db
+        .query_all_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &sql,
+            values,
+        ))
+        .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(FolderEntry {
+                id: row.try_get("", "id")?,
+                uid: row.try_get("", "uid")?,
+                read: row.try_get("", "read")?,
+                starred: row.try_get("", "starred")?,
+                answered: row.try_get("", "answered")?,
+                deleted: row.try_get("", "deleted")?,
+                size_bytes: row.try_get("", "size_bytes")?,
+                received_at: row.try_get("", "received_at")?,
+                subject: row.try_get("", "subject")?,
+                header_from: row.try_get("", "header_from")?,
+                message_id: row.try_get("", "message_id")?,
+                envelope_from: row.try_get("", "envelope_from")?,
+                envelope_to: row.try_get("", "envelope_to")?,
+                in_reply_to: row.try_get("", "in_reply_to")?,
+                storage_key: row.try_get("", "storage_key")?,
+                direction: row.try_get("", "direction")?,
+                status: row.try_get("", "status")?,
+            })
+        })
+        .collect()
+}
+
+/// The largest uid handed out so far, which is one below the next UIDNEXT.
+pub async fn max_uid(db: &DatabaseConnection, mailbox_id: Uuid) -> Result<i64> {
+    #[derive(sea_orm::FromQueryResult)]
+    struct MaxUid {
+        max_uid: Option<i64>,
+    }
+    let row: Option<MaxUid> = message::Entity::find()
+        .filter(message::Column::MailboxId.eq(mailbox_id))
+        .select_only()
+        .column_as(message::Column::Uid.max(), "max_uid")
+        .into_model::<MaxUid>()
+        .one(db)
+        .await?;
+    Ok(row.and_then(|row| row.max_uid).unwrap_or(0))
 }
 
 /// How bad a delivery state is, so a copy with several jobs reports the worst.

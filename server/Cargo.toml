@@ -16,6 +16,7 @@ dotenvy.workspace = true
 entity = { path = "../entity" }
 jsonwebtoken.workspace = true
 mail-auth.workspace = true
+mail-parser.workspace = true
 mailcore = { path = "../mailcore" }
 rand.workspace = true
 rustls.workspace = true

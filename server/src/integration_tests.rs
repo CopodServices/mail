@@ -12,7 +12,7 @@ use mailcore::store::MailStore;
 use migration::{Migrator, MigratorTrait};
 use sea_orm::{ActiveModelTrait, ColumnTrait, Database, EntityTrait, QueryFilter, Set};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use uuid::Uuid;
 
@@ -29,6 +29,8 @@ fn test_config() -> Config {
         server_port: 0,
         smtp_listen: "127.0.0.1:0".to_string(),
         submission_listen: "127.0.0.1:0".to_string(),
+        imap_listen: None,
+        pop3_listen: None,
         hostname: "mx.example.test".to_string(),
         bootstrap_domains: Vec::new(),
         bootstrap_password: None,
@@ -1937,6 +1939,8 @@ async fn set_flag(
         message_id: Set(message_id),
         read: Set(read),
         starred: Set(starred),
+        answered: Set(false),
+        deleted: Set(false),
         folder: Set(folder.to_string()),
         snoozed_until: Set(snoozed_until),
         updated_at: Set(Utc::now()),
@@ -2105,4 +2109,395 @@ async fn only_copy(
         .await
         .expect("read the copy");
     String::from_utf8_lossy(&raw).to_string()
+}
+/// The IMAP reader end to end: the folders it exposes, the reads a client makes,
+/// the flags it persists and the delete path. Needs the compose stack:
+///
+///     make up && MAIL_TEST_INTEGRATION=1 cargo test -p server -- --nocapture
+#[tokio::test]
+async fn imap_reads_the_inbox_and_applies_flags() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    let config = Arc::new(test_config());
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let store = MailStore::new(&config.s3).expect("object store");
+
+    let domain = format!("imap-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let address = format!("reader@{domain}");
+    let mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
+
+    let state = AppState {
+        db: db.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        authenticator: None,
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+
+    let raw = b"From: Alice <alice@remote.test>\r\nTo: reader\r\nSubject: imap fixture\r\nMessage-ID: <imap-fixture@remote.test>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhello from imap\r\n";
+    let id = crate::delivery::store_local(
+        &state,
+        &mailbox,
+        message::Direction::Inbound,
+        "alice@remote.test",
+        &address,
+        raw,
+        &mailcore::policy::AuthOutcome::skipped(),
+    )
+    .await
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(crate::imap::serve(listener, state.clone()));
+
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (read_half, mut writer) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+    let greeting = imap_line(&mut reader).await;
+    assert!(greeting.starts_with("* OK"), "{greeting}");
+
+    // A wrong password is refused before anything is listed.
+    let reply = imap_command(
+        &mut reader,
+        &mut writer,
+        "a1",
+        &format!("LOGIN {address} wrong"),
+    )
+    .await;
+    assert!(reply.contains("NO"), "{reply}");
+
+    let reply = imap_command(
+        &mut reader,
+        &mut writer,
+        "a2",
+        &format!("LOGIN {address} secret"),
+    )
+    .await;
+    assert!(reply.contains("a2 OK"), "{reply}");
+
+    let reply = imap_command(&mut reader, &mut writer, "a3", "LIST \"\" \"*\"").await;
+    assert!(reply.contains("\"INBOX\""), "{reply}");
+    assert!(reply.contains("\"Sent\""), "{reply}");
+    assert!(reply.contains("\\Trash"), "{reply}");
+
+    let reply = imap_command(&mut reader, &mut writer, "a4", "SELECT INBOX").await;
+    assert!(reply.contains("1 EXISTS"), "{reply}");
+    assert!(reply.contains("UIDVALIDITY"), "{reply}");
+    assert!(reply.contains("a4 OK"), "{reply}");
+
+    let reply = imap_command(
+        &mut reader,
+        &mut writer,
+        "a5",
+        "FETCH 1 (UID FLAGS RFC822.SIZE ENVELOPE BODYSTRUCTURE)",
+    )
+    .await;
+    assert!(reply.contains("ENVELOPE"), "{reply}");
+    assert!(reply.contains("\"imap fixture\""), "{reply}");
+    assert!(reply.contains("BODYSTRUCTURE"), "{reply}");
+
+    // A literal section: the body itself comes back inside BODY[TEXT].
+    let reply = imap_command(&mut reader, &mut writer, "a6", "FETCH 1 (BODY.PEEK[TEXT])").await;
+    assert!(reply.contains("hello from imap"), "{reply}");
+    assert!(reply.contains("a6 OK"), "{reply}");
+
+    let reply = imap_command(&mut reader, &mut writer, "a7", "STORE 1 +FLAGS (\\Seen)").await;
+    assert!(reply.contains("\\Seen"), "{reply}");
+
+    let reply = imap_command(&mut reader, &mut writer, "a8", "UID SEARCH UNSEEN").await;
+    assert!(reply.contains("* SEARCH"), "{reply}");
+    assert!(
+        !reply.contains("* SEARCH 1"),
+        "the message is read now: {reply}"
+    );
+
+    // An APPEND of a message that is already here is answered with the copy that
+    // exists rather than stored a second time, which is what a client saving its
+    // own sent mail would otherwise produce.
+    let reply = imap_append(
+        &mut reader,
+        &mut writer,
+        "a8b",
+        "INBOX",
+        "From: Alice <alice@remote.test>\r\nTo: reader\r\nSubject: imap fixture\r\nMessage-ID: <imap-fixture@remote.test>\r\n\r\nhello from imap\r\n",
+    )
+    .await;
+    assert!(reply.contains("Message already stored"), "{reply}");
+    assert_eq!(
+        message::Entity::find()
+            .filter(message::Column::MailboxId.eq(mailbox.id))
+            .all(&db)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "a duplicate APPEND stores nothing"
+    );
+
+    let reply = imap_command(
+        &mut reader,
+        &mut writer,
+        "a9",
+        &format!(
+            "UID STORE {} +FLAGS (\\Deleted)",
+            repo::get_message(&db, id)
+                .await
+                .unwrap()
+                .expect("the fixture")
+                .uid
+        ),
+    )
+    .await;
+    assert!(reply.contains("a9 OK"), "{reply}");
+    let reply = imap_command(&mut reader, &mut writer, "a10", "EXPUNGE").await;
+    assert!(reply.contains("1 EXPUNGE"), "{reply}");
+
+    let reply = imap_command(&mut reader, &mut writer, "a11", "LOGOUT").await;
+    assert!(reply.contains("a11 OK"), "{reply}");
+
+    let remaining = message::Entity::find()
+        .filter(message::Column::Id.eq(id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert!(remaining.is_empty(), "an expunged message leaves no row");
+
+    let _ = repo::delete_mailbox(&db, &address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
+/// The POP3 drop end to end: the single reader lock, the listing, a download
+/// that marks the message read, and the delete at QUIT.
+#[tokio::test]
+async fn pop3_downloads_and_deletes_the_drop() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    let config = Arc::new(test_config());
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let store = MailStore::new(&config.s3).expect("object store");
+
+    let domain = format!("pop3-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let address = format!("dropper@{domain}");
+    let mailbox = repo::create_mailbox(&db, &address, "secret").await.unwrap();
+
+    let state = AppState {
+        db: db.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        authenticator: None,
+        tls: None,
+        events: tokio::sync::broadcast::channel(16).0,
+    };
+
+    let raw = b"From: Alice <alice@remote.test>\r\nTo: dropper\r\nSubject: pop3 fixture\r\n\r\nhello from pop3\r\n";
+    let id = crate::delivery::store_local(
+        &state,
+        &mailbox,
+        message::Direction::Inbound,
+        "alice@remote.test",
+        &address,
+        raw,
+        &mailcore::policy::AuthOutcome::skipped(),
+    )
+    .await
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(crate::pop3::serve(listener, state.clone()));
+
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (read_half, mut writer) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+    assert!(pop3_line(&mut reader).await.starts_with("+OK"));
+
+    let reply = pop3_command(&mut reader, &mut writer, &format!("USER {address}")).await;
+    assert!(reply.starts_with("+OK"), "{reply}");
+    let reply = pop3_command(&mut reader, &mut writer, "PASS secret").await;
+    assert!(reply.starts_with("+OK"), "{reply}");
+
+    // A second reader is refused while the drop is open.
+    let second = TcpStream::connect(addr).await.unwrap();
+    let (second_read, mut second_write) = tokio::io::split(second);
+    let mut second_reader = BufReader::new(second_read);
+    assert!(pop3_line(&mut second_reader).await.starts_with("+OK"));
+    let _ = pop3_command(
+        &mut second_reader,
+        &mut second_write,
+        &format!("USER {address}"),
+    )
+    .await;
+    let reply = pop3_command(&mut second_reader, &mut second_write, "PASS secret").await;
+    assert!(reply.contains("IN-USE"), "{reply}");
+    drop(second_reader);
+    drop(second_write);
+
+    let reply = pop3_block(&mut reader, &mut writer, "CAPA").await;
+    assert!(reply.contains("UIDL"), "{reply}");
+    assert!(reply.contains("TOP"), "{reply}");
+
+    let reply = pop3_command(&mut reader, &mut writer, "STAT").await;
+    assert!(reply.starts_with("+OK 1 "), "{reply}");
+
+    let reply = pop3_block(&mut reader, &mut writer, "LIST").await;
+    assert!(reply.contains("1 "), "{reply}");
+
+    let reply = pop3_block(&mut reader, &mut writer, "RETR 1").await;
+    assert!(reply.contains("hello from pop3"), "{reply}");
+    assert!(reply.trim_end().ends_with('.'), "{reply}");
+
+    let reply = pop3_block(&mut reader, &mut writer, "TOP 1 0").await;
+    assert!(reply.contains("Subject: pop3 fixture"), "{reply}");
+
+    let stored = message::Entity::find()
+        .filter(message::Column::Id.eq(id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    let flag = entity::message_flag::Entity::find_by_id(id)
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("a flag row");
+    assert!(flag.read, "RETR marks the message read");
+
+    let reply = pop3_command(&mut reader, &mut writer, "DELE 1").await;
+    assert!(reply.starts_with("+OK"), "{reply}");
+    let reply = pop3_command(&mut reader, &mut writer, "QUIT").await;
+    assert!(reply.starts_with("+OK"), "{reply}");
+    // The drop is cleared once the reply is out, so wait for the close before
+    // looking at what is left behind.
+    let mut rest = Vec::new();
+    let _ = reader.read_to_end(&mut rest).await;
+
+    let remaining = message::Entity::find()
+        .filter(message::Column::Id.eq(id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert!(remaining.is_empty(), "QUIT removes what was deleted");
+
+    let _ = repo::delete_mailbox(&db, &address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
+/// A reader over an IMAP session that keeps literals intact.
+type ImapReader = BufReader<tokio::io::ReadHalf<TcpStream>>;
+type ImapWriter = tokio::io::WriteHalf<TcpStream>;
+
+/// Sends one tagged command and returns every line it produced, literals
+/// included, up to and including the tagged reply.
+async fn imap_command(
+    reader: &mut ImapReader,
+    writer: &mut ImapWriter,
+    tag: &str,
+    line: &str,
+) -> String {
+    command(writer, &format!("{tag} {line}")).await;
+    imap_block(reader, tag).await
+}
+
+/// Sends an APPEND with its literal and reads the reply.
+async fn imap_append(
+    reader: &mut ImapReader,
+    writer: &mut ImapWriter,
+    tag: &str,
+    mailbox: &str,
+    body: &str,
+) -> String {
+    let head = format!("{tag} APPEND {mailbox} {{{}}}\r\n", body.len());
+    writer.write_all(head.as_bytes()).await.unwrap();
+    writer.write_all(body.as_bytes()).await.unwrap();
+    writer.write_all(&CRLF).await.unwrap();
+    writer.flush().await.unwrap();
+    imap_block(reader, tag).await
+}
+
+async fn imap_block(reader: &mut ImapReader, tag: &str) -> String {
+    let mut out = String::new();
+    loop {
+        let text = imap_line(reader).await;
+        out.push_str(&text);
+        if let Some(size) = literal_size(&text) {
+            let mut bytes = vec![0u8; size];
+            reader.read_exact(&mut bytes).await.unwrap();
+            out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        if text.starts_with(&format!("{tag} ")) {
+            return out;
+        }
+    }
+}
+
+/// Reads one IMAP line, terminator included, as text.
+async fn imap_line(reader: &mut ImapReader) -> String {
+    let mut line = Vec::new();
+    let read = reader.read_until(b'\n', &mut line).await.unwrap();
+    assert!(read > 0, "connection closed before an IMAP reply");
+    String::from_utf8_lossy(&line).to_string()
+}
+
+/// The size a line announces with a trailing literal marker.
+fn literal_size(line: &str) -> Option<usize> {
+    let trimmed = line.trim_end_matches(['\r', '\n']);
+    let open = trimmed.rfind('{')?;
+    let close = trimmed.rfind('}')?;
+    if close <= open {
+        return None;
+    }
+    trimmed[open + 1..close].parse().ok()
+}
+
+/// A reader over a POP3 session.
+type Pop3Reader = BufReader<tokio::io::ReadHalf<TcpStream>>;
+type Pop3Writer = tokio::io::WriteHalf<TcpStream>;
+
+async fn pop3_line(reader: &mut Pop3Reader) -> String {
+    let mut line = String::new();
+    let read = reader.read_line(&mut line).await.unwrap();
+    assert!(read > 0, "connection closed before a POP3 reply");
+    line
+}
+
+async fn pop3_command(reader: &mut Pop3Reader, writer: &mut Pop3Writer, line: &str) -> String {
+    command(writer, line).await;
+    pop3_line(reader).await
+}
+
+/// Sends a command whose reply is a multi-line block and reads it whole.
+async fn pop3_block(reader: &mut Pop3Reader, writer: &mut Pop3Writer, line: &str) -> String {
+    let mut out = pop3_command(reader, writer, line).await;
+    if !out.starts_with("+OK") {
+        return out;
+    }
+    loop {
+        let line = pop3_line(reader).await;
+        out.push_str(&line);
+        if line.trim_end_matches(['\r', '\n']) == "." {
+            return out;
+        }
+    }
 }
