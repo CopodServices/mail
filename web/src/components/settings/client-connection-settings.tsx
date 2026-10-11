@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useLanguage } from "@/components/language-provider";
 import { fetchClientConnection } from "@/lib/api/endpoints";
 import type { ClientConnection } from "@/lib/api/types";
+import type { Translator } from "@/lib/i18n/utils";
 
 /** One copyable row of the connection table. */
 function ConnectionField({ label, value }: { label: string; value: string }) {
@@ -46,9 +47,65 @@ function ConnectionField({ label, value }: { label: string; value: string }) {
 	);
 }
 
+/** The TLS mode as a client reads it back. */
+function securityLabel(t: Translator, value: string): string {
+	if (value === "starttls") return t("settings.clients.starttls");
+	if (value === "tls") return "TLS";
+	return t("settings.clients.none");
+}
+
 /**
- * The submission settings another mail app uses to send as this mailbox. The
- * values are read from the server, so the host and port match the deployment.
+ * One protocol's settings, under the protocol's own name. The name is not
+ * translated: IMAP, POP3 and SMTP are what the client asks for too. A protocol
+ * this server does not answer says so instead of showing a dead endpoint.
+ */
+function ConnectionBlock({
+	label,
+	supported,
+	host,
+	port,
+	security,
+	username,
+}: {
+	label: string;
+	supported: boolean;
+	host: string;
+	port: string;
+	security: string;
+	username?: string | null;
+}) {
+	const { t } = useLanguage();
+	return (
+		<div className="space-y-1">
+			<h3 className="text-sm font-semibold text-neutral-900">{label}</h3>
+			{supported ? (
+				<dl className="divide-y divide-neutral-100">
+					<ConnectionField label={t("settings.clients.server")} value={host} />
+					<ConnectionField label={t("settings.clients.port")} value={port} />
+					<ConnectionField
+						label={t("settings.clients.security")}
+						value={security}
+					/>
+					{username ? (
+						<ConnectionField
+							label={t("settings.clients.username")}
+							value={username}
+						/>
+					) : null}
+				</dl>
+			) : (
+				<p className="text-sm text-neutral-500">
+					{t("settings.clients.notEnabled")}
+				</p>
+			)}
+		</div>
+	);
+}
+
+/**
+ * The settings another mail app uses for this mailbox: the SMTP submission it
+ * sends with, and the IMAP and POP3 readers when this server offers them. The
+ * values are read from the server, so the hosts and ports match the deployment.
  */
 export function ClientConnectionSettings() {
 	const { t } = useLanguage();
@@ -75,36 +132,35 @@ export function ClientConnectionSettings() {
 		);
 	if (!connection) return <p className="text-sm text-neutral-500">…</p>;
 
-	const security =
-		connection.smtpSecurity === "starttls"
-			? t("settings.clients.starttls")
-			: t("settings.clients.none");
-
 	return (
-		<div className="space-y-4">
+		<div className="space-y-6">
 			<p className="text-sm text-neutral-500">
 				{t("settings.clients.description")}
 			</p>
-			<dl className="divide-y divide-neutral-100">
-				<ConnectionField
-					label={t("settings.clients.server")}
-					value={connection.smtpHost}
-				/>
-				<ConnectionField
-					label={t("settings.clients.port")}
-					value={String(connection.smtpPort)}
-				/>
-				<ConnectionField
-					label={t("settings.clients.security")}
-					value={security}
-				/>
-				{connection.username && (
-					<ConnectionField
-						label={t("settings.clients.username")}
-						value={connection.username}
-					/>
-				)}
-			</dl>
+			<ConnectionBlock
+				label="IMAP"
+				supported={connection.imapSupported}
+				host={connection.imapHost}
+				port={String(connection.imapPort)}
+				security={securityLabel(t, connection.imapSecurity)}
+				username={connection.username}
+			/>
+			<ConnectionBlock
+				label="POP3"
+				supported={connection.pop3Supported}
+				host={connection.pop3Host}
+				port={String(connection.pop3Port)}
+				security={securityLabel(t, connection.pop3Security)}
+				username={connection.username}
+			/>
+			<ConnectionBlock
+				label="SMTP"
+				supported
+				host={connection.smtpHost}
+				port={String(connection.smtpPort)}
+				security={securityLabel(t, connection.smtpSecurity)}
+				username={connection.username}
+			/>
 		</div>
 	);
 }
