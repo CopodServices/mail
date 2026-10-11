@@ -9,6 +9,10 @@ use mail_parser::MimeHeaders;
 pub struct Attachment {
     pub filename: Option<String>,
     pub content_type: Option<String>,
+    /// Content-ID of an inline part, without its angle brackets. A body that
+    /// embeds a picture writes it as a cid: reference, and the reader rewrites
+    /// that reference to the part's bytes.
+    pub content_id: Option<String>,
     pub bytes: Vec<u8>,
 }
 
@@ -68,6 +72,7 @@ pub fn extract(raw: &[u8]) -> Body {
                     content_type.subtype().unwrap_or("octet-stream")
                 )
             }),
+            content_id: content_id(part),
             bytes: part.contents().to_vec(),
         })
         .collect();
@@ -81,6 +86,20 @@ pub fn extract(raw: &[u8]) -> Body {
         bcc: address_list(parsed.bcc()),
         unsubscribe_url: unsubscribe_url(raw),
     }
+}
+
+/// The Content-ID a part carries, in the shape an HTML cid: reference uses: the
+/// angle brackets belong to the header syntax, not to the value a body writes.
+fn content_id(part: &mail_parser::MessagePart<'_>) -> Option<String> {
+    let value = part.content_id()?;
+    let value = value
+        .trim()
+        .strip_prefix('<')
+        .unwrap_or(value)
+        .strip_suffix('>')
+        .unwrap_or(value)
+        .trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Pulls the first http(s) URL out of the List-Unsubscribe header, if present.
@@ -159,6 +178,39 @@ file body
         assert_eq!(body.attachments.len(), 1);
         assert_eq!(body.attachments[0].filename.as_deref(), Some("note.txt"));
         assert_eq!(body.attachments[0].bytes, b"file body");
+    }
+
+    #[test]
+    fn exposes_the_content_id_of_an_inline_image() {
+        let raw = b"From: a@example.test
+To: b@example.test
+Subject: Hi
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary=xyz
+
+--xyz
+Content-Type: text/html; charset=utf-8
+
+<img src=\"cid:logo@example.test\">
+--xyz
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <logo@example.test>
+Content-Disposition: inline
+
+aGk=
+--xyz--
+";
+        let body = extract(raw);
+        assert_eq!(body.attachments.len(), 1);
+        let image = &body.attachments[0];
+        assert_eq!(image.content_id.as_deref(), Some("logo@example.test"));
+        assert_eq!(image.content_type.as_deref(), Some("image/png"));
+        assert!(
+            body.html
+                .as_deref()
+                .is_some_and(|html| html.contains("cid:logo@example.test"))
+        );
     }
 
     #[test]
