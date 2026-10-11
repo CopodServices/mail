@@ -129,8 +129,9 @@ of forwarded mail. The copy carries an X-Copod-Auto-Forwarded header, so a copy
 that loops back is delivered but never forwarded again, and forwarding to the
 mailbox's own address is ignored. A relay that refuses the sender's domain,
 because its SMTP user may not send from arbitrary domains, is answered by the
-queue: it rewrites the copy to go out as the mailbox with the original sender on
-Reply-To, drops the traces over the old sender, and retries it once.
+queue: it rewrites the copy to go out as the mailbox, names the original sender
+in the From display name and puts their address on Reply-To, drops the traces
+over the old sender, and retries it once.
 
 A draft is an ordinary message row whose reader flag puts it in the drafts
 folder, with the composed message in object storage, so the drafts list, counts

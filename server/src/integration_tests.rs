@@ -1043,6 +1043,79 @@ async fn auto_forwards_an_arriving_message_once() {
         .await;
 }
 
+/// Saving a job keeps the envelope it was called with: the queue rewrites a
+/// refused forward's sender and has to be able to record the new one. Needs the
+/// compose stack and MAIL_TEST_INTEGRATION=1.
+#[tokio::test]
+async fn saving_a_job_records_the_envelope_it_was_given() {
+    if std::env::var("MAIL_TEST_INTEGRATION").is_err() {
+        eprintln!("skipping: set MAIL_TEST_INTEGRATION=1 with the compose stack running");
+        return;
+    }
+
+    let config = test_config();
+    let db = Database::connect(&config.database_url)
+        .await
+        .expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+
+    let domain = format!("job-{}.example", Uuid::now_v7().simple());
+    repo::ensure_domain(&db, &domain).await.unwrap();
+    let mailbox = repo::create_mailbox(&db, &format!("inbox@{domain}"), "secret")
+        .await
+        .unwrap();
+
+    let id = Uuid::now_v7();
+    let now = Utc::now();
+    repo::enqueue_job(
+        &db,
+        outbound_job::ActiveModel {
+            id: Set(id),
+            mailbox_id: Set(Some(mailbox.id)),
+            envelope_from: Set(format!("SRS0=AAAA=11=gmail.com=someone@{domain}")),
+            recipients: Set(serde_json::json!(["dest@remote.test"])),
+            storage_key: Set(format!("fixtures/job-{id}")),
+            message_id: Set(None),
+            scheduled_message_id: Set(None),
+            copy_message_id: Set(None),
+            attempts: Set(0),
+            next_attempt_at: Set(now),
+            status: Set(outbound_job::JobStatus::Pending),
+            last_error: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        },
+    )
+    .await
+    .unwrap();
+
+    repo::save_job(
+        &db,
+        id,
+        &mailbox.address,
+        outbound_job::JobStatus::Pending,
+        0,
+        now,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let saved = outbound_job::Entity::find_by_id(id)
+        .one(&db)
+        .await
+        .unwrap()
+        .expect("the job");
+    assert_eq!(saved.envelope_from, mailbox.address);
+
+    let _ = outbound_job::Entity::delete_by_id(id).exec(&db).await;
+    let _ = repo::delete_mailbox(&db, &mailbox.address).await;
+    let _ = entity::domain::Entity::delete_many()
+        .filter(entity::domain::Column::Name.eq(domain))
+        .exec(&db)
+        .await;
+}
+
 /// Delivers one message to `recipient` over a fresh inbound session.
 async fn deliver_inbound(addr: std::net::SocketAddr, from: &str, recipient: &str, lines: &[&str]) {
     let stream = TcpStream::connect(addr).await.unwrap();

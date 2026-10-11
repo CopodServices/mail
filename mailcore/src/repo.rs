@@ -382,6 +382,7 @@ pub async fn claim_due_jobs(
 pub async fn save_job(
     db: &DatabaseConnection,
     id: Uuid,
+    envelope_from: &str,
     status: outbound_job::JobStatus,
     attempts: i32,
     next_attempt_at: chrono::DateTime<Utc>,
@@ -389,6 +390,7 @@ pub async fn save_job(
 ) -> Result<()> {
     let active = outbound_job::ActiveModel {
         id: Set(id),
+        envelope_from: Set(envelope_from.to_string()),
         status: Set(status),
         attempts: Set(attempts),
         next_attempt_at: Set(next_attempt_at),

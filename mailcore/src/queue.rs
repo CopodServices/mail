@@ -88,6 +88,7 @@ impl Queue {
         if let Err(err) = repo::save_job(
             &self.db,
             job.id,
+            &job.envelope_from,
             job.status,
             job.attempts,
             job.next_attempt_at,

@@ -49,7 +49,7 @@ pub fn sender_domain_refused(message: &str) -> bool {
 /// sender's identity, and the signatures and traces taken over it. The copy goes
 /// out again as the mailbox's own message, so a signature over the old From
 /// would not validate and a Received chain would describe a different delivery.
-const DROPPED_HEADERS: [&str; 9] = [
+const DROPPED_HEADERS: [&str; 15] = [
     "from",
     "sender",
     "return-path",
@@ -59,6 +59,14 @@ const DROPPED_HEADERS: [&str; 9] = [
     "arc-seal",
     "arc-message-signature",
     "arc-authentication-results",
+    // The marker of an earlier pass, so a copy is never marked twice.
+    "x-copod-auto-forwarded",
+    // The sender's own provider, which no longer says anything about this copy.
+    "x-received",
+    "x-google-dkim-signature",
+    "x-gm-message-state",
+    "x-gm-gg",
+    "x-gm-features",
 ];
 
 /// Rewrites a forwarded copy for a sender domain the relay refuses.
@@ -91,17 +99,37 @@ pub fn rewrite_sender(raw: &[u8], address: &str, display_name: Option<&str>) -> 
         }
     }
 
-    let from = match display_name.map(str::trim).filter(|name| !name.is_empty()) {
-        Some(name) => format!("\"{}\" <{address}>", name.replace('"', "")),
-        None => address.to_string(),
-    };
     // A From header may carry a display name, which the envelope parser does not
     // read; the metadata extractor returns the bare address.
-    let reply_to = meta::extract(raw)
+    let sender = meta::extract(raw)
         .header_from
         .and_then(|value| address::parse(&value))
-        .or_else(|| original_from.as_deref().and_then(address::parse))
-        .map(|parsed| parsed.normalized());
+        .or_else(|| original_from.as_deref().and_then(address::parse));
+    let reply_to = sender.as_ref().map(|parsed| parsed.normalized());
+    let original_name = original_from
+        .as_deref()
+        .and_then(|value| value.split('<').next())
+        .map(|name| name.trim().trim_matches('"').trim().to_string())
+        .filter(|name| !name.is_empty());
+    let mailbox_name = display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| name.replace('"', ""));
+    // The recipient has to see who the message came from even though the mailbox
+    // has to own the From, so the original sender is named in the display name.
+    let from = match (original_name.or_else(|| reply_to.clone()), mailbox_name) {
+        (Some(original), Some(name)) => {
+            format!("\"{} via {name}\" <{address}>", original.replace('"', ""))
+        }
+        (Some(original), None) => {
+            format!(
+                "\"{} via {address}\" <{address}>",
+                original.replace('"', "")
+            )
+        }
+        (None, Some(name)) => format!("\"{name}\" <{address}>"),
+        (None, None) => address.to_string(),
+    };
 
     let mut out = Vec::with_capacity(raw.len() + 160);
     out.extend_from_slice(format!("{MARKER}: {address}\r\nFrom: {from}\r\n").as_bytes());
@@ -177,7 +205,7 @@ mod tests {
             text.starts_with("X-Copod-Auto-Forwarded: inbox@example.test\r\n"),
             "{text}"
         );
-        assert!(text.contains("\r\nFrom: \"Inbox\" <inbox@example.test>\r\n"));
+        assert!(text.contains("\r\nFrom: \"Alice via Inbox\" <inbox@example.test>\r\n"));
         assert!(text.contains("\r\nReply-To: alice@remote.test\r\n"));
         // The identity the relay would refuse, and the traces over it, are gone.
         assert!(!text.contains("From: Alice"));
@@ -195,9 +223,50 @@ mod tests {
         let text = String::from_utf8_lossy(&rewritten);
         // The folded original goes away (the address is read out of it first).
         assert!(!text.contains("From: Alice"), "{text}");
-        assert!(text.contains("\r\nFrom: inbox@example.test\r\n"));
+        assert!(
+            text.contains("\r\nFrom: \"Alice via inbox@example.test\" <inbox@example.test>\r\n"),
+            "{text}"
+        );
+        assert!(!text.contains("<alice@remote.test>"), "{text}");
         assert!(text.contains("\r\nReply-To: alice@remote.test\r\n"));
         assert!(text.contains("\r\nSubject: hi\r\n"));
+    }
+
+    #[test]
+    fn a_rewrite_replaces_the_marker_it_was_given() {
+        let raw = b"From: Alice <alice@remote.test>\r\nSubject: hi\r\n\r\nbody";
+        let rewritten =
+            rewrite_sender(&mark(raw, "inbox@example.test"), "inbox@example.test", None);
+        let text = String::from_utf8_lossy(&rewritten);
+        assert_eq!(
+            text.matches("X-Copod-Auto-Forwarded:").count(),
+            1,
+            "a copy must carry the marker once: {text}"
+        );
+    }
+
+    #[test]
+    fn a_rewrite_drops_the_senders_own_provider_headers() {
+        let raw = concat!(
+            "From: Alice <alice@remote.test>\r\n",
+            "X-Received: by 2002:a05 with SMTP id af79\r\n",
+            "X-Google-DKIM-Signature: v=1; d=1e100.net\r\n",
+            "X-Gm-Message-State: AFq9\r\n",
+            "Subject: hi\r\n",
+            "\r\n",
+            "body",
+        )
+        .as_bytes();
+        let rewritten = rewrite_sender(raw, "inbox@example.test", None);
+        let text = String::from_utf8_lossy(&rewritten).to_lowercase();
+        for header in [
+            "x-received:",
+            "x-google-dkim-signature:",
+            "x-gm-message-state:",
+        ] {
+            assert!(!text.contains(header), "{header} survived: {text}");
+        }
+        assert!(text.contains("subject: hi"));
     }
 
     #[test]
