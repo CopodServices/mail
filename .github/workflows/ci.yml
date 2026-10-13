@@ -14,6 +14,8 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Skip CI when the agent-asset sync bot pushes .agents/ from CopodServices/agents.
+    if: github.event_name != 'push' || github.event.head_commit.author.name != 'Agents Sync'
     services:
       postgres:
         image: postgres:17-alpine
@@ -86,6 +88,8 @@ jobs:
   web:
     name: Web
     runs-on: ubuntu-latest
+    # Skip CI when the agent-asset sync bot pushes .agents/ from CopodServices/agents.
+    if: github.event_name != 'push' || github.event.head_commit.author.name != 'Agents Sync'
     steps:
       - uses: actions/checkout@v4
 
