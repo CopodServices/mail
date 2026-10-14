@@ -29,7 +29,7 @@ by `.github/workflows/sync.yaml`.
 | Directory | What it is | Stack | CI workflow |
 | --- | --- | --- | --- |
 | `backend/` | cPOD Panel API: the multi-tenant control plane for stateless (PHP) and stateful (Node.js, game servers) workloads | Rust 2024 workspace, Axum, SeaORM, PostgreSQL | `.github/workflows/test.yml` ("Build Test") |
-| `dashboard/` | Panel console: accounts, plans, websites, servers, databases, domains and admin; talks to daemon nodes directly for power, console, commands and files | Next.js 16, React 19, bun, Biome, Tailwind 4 | `.github/workflows/test.yml` ("Build Test") |
+| `dashboard/` | Panel console: accounts, projects, plans, websites, servers, databases, domains and admin; talks to daemon nodes directly for power, console, commands and files | Next.js 16, React 19, bun, Biome, Tailwind 4 | `.github/workflows/test.yml` ("Build Test") |
 | `daemon/` | Region-level Kubernetes controller that runs customer workloads | Go 1.26 (module `github.com/copodservices/daemon`), Gin, PostgreSQL | `.github/workflows/push.yaml` ("Push"), plus `docker.yaml` and `release.yaml` |
 | `mail/` | Inbound mail server, submission service and webmail | Rust 2024 workspace, SeaORM; static Next.js 16 client in `web/` | `.github/workflows/ci.yml` ("CI") |
 
@@ -50,11 +50,17 @@ requests.
 
 ## backend — cPOD Panel API
 
-Rust workspace (edition 2024) for the panel. The panel owns accounts, plans, quotas, port
-allocations, domains and databases, and provisions every workload over the daemon REST API
-with a per-node API key. Browser traffic for power, commands, logs, console websocket and
-files goes directly from the dashboard to the node using short-lived, workload-scoped JWTs
-minted by `POST /apps/{uuid}/token`; bytes never pass through the panel. Volume
+Rust workspace (edition 2024) for the panel. The panel owns accounts, **projects**, plans,
+quotas, port allocations, domains and databases, and provisions every workload over the
+daemon REST API with a per-node API key. A project is the ownership boundary for every
+service: an account owns any number of them, each carries its own plan and quotas, and each
+maps to its own `{project-slug}-workloads` namespace on the daemon. Service routes
+(`/apps`, `/databases`, `/apps/{uuid}/domains`, `/apps/{uuid}/backups`, …) take the project
+from the required `X-Project-Id` header and refuse a request without it, while `/projects`
+manages the projects themselves. Browser traffic for power, commands, logs, console
+websocket and files goes directly from the dashboard to the node using short-lived,
+workload-scoped JWTs minted by `POST /apps/{uuid}/token`; bytes never pass through the
+panel. Volume
 backups are zip archives of the workload volume kept in `.backups`;
 `POST /apps/{uuid}/backups` queues a job (202) that the worker runs in the background.
 
@@ -62,7 +68,7 @@ backups are zip archives of the workload volume kept in `.backups`;
 
 | Path | Contents |
 | --- | --- |
-| `api` | Axum HTTP surface: auth, apps, domains, databases, admin (`src/routes`) |
+| `api` | Axum HTTP surface: auth, projects, apps, domains, databases, admin (`src/routes`) |
 | `entity` | SeaORM entities |
 | `migration` / `migrator` | Migrations and the one-shot runner |
 | `schema` | Request/response DTOs shared with the OpenAPI document |
@@ -131,6 +137,13 @@ power, console, commands and files via short-lived scoped tokens. Bun is the pac
 manager and runner, Biome owns lint and format, and Tailwind 4 with Radix/shadcn provides
 the UI layer.
 
+The console is organised around the **project**: a switcher directly under the sidebar
+header picks the active project, and everything a project owns (apps, databases, domains,
+email, files, security, metrics, advanced, project settings) sits in a "Project" group that
+only appears once the account owns a project. Creating a project is reachable from that
+switcher and from `/console/projects/new`. An account with no project at all is redirected
+there by `requireProject()`, so every project-scoped screen has a project to act on.
+
 <!-- BEGIN:nextjs-agent-rules -->
 
 # This is NOT the Next.js you know
@@ -146,7 +159,9 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 | Path | Contents |
 | --- | --- |
 | `src/app/(auth)` | Sign in and registration, with the public plan picker |
-| `src/app/(console)/console` | Overview, apps, databases, plan |
+| `src/app/(console)/console` | Overview and account (always visible), plus the project sections: apps, databases, domains, email, files, security, metrics, advanced, project settings |
+| `src/app/(console)/console/projects/new` | Creates a project; the landing page for an account that owns none |
+| `src/app/(console)/console/project/settings` | Rename, re-plan and delete the active project |
 | `src/app/(console)/console/admin` | Plans, nodes, users, apps, activity |
 | `src/app/actions` | Server actions for every mutation |
 | `src/components/{auth,console,ui}` | Forms, console widgets, shadcn-style primitives |
